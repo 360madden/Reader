@@ -3,6 +3,7 @@ Name = "ReaderBridge"
 NameShort = "RB"
 Description = "Exports player data as a scannable marker string for external readers."
 Author = "Reader"
+Email = ""
 Version = "0.1.0"
 Environment = "4.4"
 RunOnStartup = {
