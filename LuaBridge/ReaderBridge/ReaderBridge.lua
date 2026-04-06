@@ -26,12 +26,12 @@ local function GetResource(detail)
         return "mana", detail.mana or 0, detail.manaMax
     elseif detail.energyMax and detail.energyMax > 0 then
         return "energy", detail.energy or 0, detail.energyMax
-    elseif detail.powerMax and detail.powerMax > 0 then
-        return "power", detail.power or 0, detail.powerMax
+    elseif detail.power ~= nil then
+        return "power", detail.power, detail.powerMax or 100
     elseif detail.chargeMax and detail.chargeMax > 0 then
         return "charge", detail.charge or 0, detail.chargeMax
-    elseif detail.comboMax and detail.comboMax > 0 then
-        return "combo", detail.combo or 0, detail.comboMax
+    elseif detail.combo ~= nil then
+        return "combo", detail.combo, detail.comboMax or 0
     end
     return "", 0, 0
 end
@@ -126,8 +126,65 @@ end
 
 local VERSION = "0.1.0"
 
+-- Debug dump window
+local dumpCtx = UI.CreateContext("ReaderBridgeDump")
+local dumpWin = UI.CreateFrame("Frame", "RBDumpWin", dumpCtx)
+dumpWin:SetPoint("CENTER", UIParent, "CENTER")
+dumpWin:SetWidth(500)
+dumpWin:SetHeight(350)
+dumpWin:SetBackgroundColor(0, 0, 0, 0.9)
+dumpWin:SetVisible(false)
+
+local dumpBar = UI.CreateFrame("Frame", "RBDumpBar", dumpWin)
+dumpBar:SetPoint("TOPLEFT", dumpWin, "TOPLEFT", 0, 0)
+dumpBar:SetPoint("TOPRIGHT", dumpWin, "TOPRIGHT", 0, 0)
+dumpBar:SetHeight(20)
+dumpBar:SetBackgroundColor(0.2, 0.2, 0.2, 1)
+
+local dumpTitle = UI.CreateFrame("Text", "RBDumpTitle", dumpBar)
+dumpTitle:SetPoint("CENTER", dumpBar, "CENTER")
+dumpTitle:SetText("ReaderBridge - Player Detail Dump")
+
+local dumpTf = UI.CreateFrame("RiftTextfield", "RBDumpTF", dumpWin)
+dumpTf:SetPoint("TOPLEFT", dumpWin, "TOPLEFT", 5, 25)
+dumpTf:SetPoint("BOTTOMRIGHT", dumpWin, "BOTTOMRIGHT", -5, -5)
+
+-- Drag support
+dumpBar:EventAttach(Event.UI.Input.Mouse.Left.Down, function(self)
+    local m = Inspect.Mouse()
+    self.drag = true
+    self.ox = m.x - dumpWin:GetLeft()
+    self.oy = m.y - dumpWin:GetTop()
+end, "D")
+dumpBar:EventAttach(Event.UI.Input.Mouse.Cursor.Move, function(self)
+    if not self.drag then return end
+    local m = Inspect.Mouse()
+    dumpWin:SetPoint("TOPLEFT", UIParent, "TOPLEFT", m.x - self.ox, m.y - self.oy)
+end, "M")
+dumpBar:EventAttach(Event.UI.Input.Mouse.Left.Up, function(self)
+    self.drag = false
+end, "U")
+
+local function DumpPlayerFields()
+    local player = SafeUnitDetail("player")
+    if not player then return end
+
+    local keys = {}
+    for k, _ in pairs(player) do keys[#keys + 1] = k end
+    table.sort(keys)
+
+    local lines = {}
+    for _, k in ipairs(keys) do
+        lines[#lines + 1] = k .. "=" .. tostring(player[k])
+    end
+    dumpTf:SetText(table.concat(lines, "\n"))
+    dumpWin:SetVisible(true)
+end
+
+table.insert(Command.Slash.Register("readerdump"), {DumpPlayerFields, "ReaderBridge", "dump player fields"})
+
 local function OnLoad()
-    Command.Console.Display("general", true, "<font color='#00CC88'>[ReaderBridge v" .. VERSION .. "]</font> Loaded and running.", true)
+    Command.Console.Display("general", true, "<font color='#00CC88'>[ReaderBridge v" .. VERSION .. "]</font> Loaded. Type /readerdump to inspect fields.", true)
     Refresh()
 end
 
