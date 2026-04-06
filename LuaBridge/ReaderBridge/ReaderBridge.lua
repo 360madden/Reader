@@ -9,8 +9,8 @@
 ReaderBridge = {}
 ReaderBridge_Data = ""
 
-local UPDATE_INTERVAL = 0.2
-local lastTime = 0
+local FRAMES_PER_UPDATE = 12  -- ~0.2s at 60fps
+local frameCount = 0
 
 -- Safely call Inspect.Unit.Detail; returns nil on any error.
 local function SafeUnitDetail(unitSpec)
@@ -118,9 +118,9 @@ local function Refresh()
 end
 
 local function OnUpdate(h)
-    local now = Inspect.System.Time()
-    if now - lastTime < UPDATE_INTERVAL then return end
-    lastTime = now
+    frameCount = frameCount + 1
+    if frameCount < FRAMES_PER_UPDATE then return end
+    frameCount = 0
     Refresh()
 end
 
