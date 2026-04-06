@@ -10,7 +10,7 @@ ReaderBridge = {}
 ReaderBridge_Data = ""
 
 local UPDATE_INTERVAL = 0.2
-local elapsed = 0
+local lastTime = 0
 
 -- Safely call Inspect.Unit.Detail; returns nil on any error.
 local function SafeUnitDetail(unitSpec)
@@ -117,10 +117,10 @@ local function Refresh()
         .. "|##END_READER##"
 end
 
-local function OnUpdate(h, delta)
-    elapsed = elapsed + delta
-    if elapsed < UPDATE_INTERVAL then return end
-    elapsed = 0
+local function OnUpdate(h)
+    local now = Inspect.System.Time()
+    if now - lastTime < UPDATE_INTERVAL then return end
+    lastTime = now
     Refresh()
 end
 
