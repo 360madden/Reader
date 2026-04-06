@@ -124,7 +124,10 @@ local function OnUpdate(h)
     Refresh()
 end
 
+local VERSION = "0.1.0"
+
 local function OnLoad()
+    print("|cFF00CC88[ReaderBridge v" .. VERSION .. "]|r Loaded and running.")
     Refresh()
 end
 
