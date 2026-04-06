@@ -127,7 +127,7 @@ end
 local VERSION = "0.1.0"
 
 local function OnLoad()
-    print("<font color='#00CC88'>[ReaderBridge v" .. VERSION .. "]</font> Loaded and running.")
+    Command.Console.Display("general", true, "<font color='#00CC88'>[ReaderBridge v" .. VERSION .. "]</font> Loaded and running.", true)
     Refresh()
 end
 
