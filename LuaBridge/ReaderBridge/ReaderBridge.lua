@@ -127,7 +127,7 @@ end
 local VERSION = "0.1.0"
 
 local function OnLoad()
-    print("|cFF00CC88[ReaderBridge v" .. VERSION .. "]|r Loaded and running.")
+    print("<font color=\"#00CC88\">[ReaderBridge v" .. VERSION .. "]</font> Loaded and running.")
     Refresh()
 end
 
