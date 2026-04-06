@@ -1,8 +1,18 @@
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Reader.Core;
 using Reader.Models;
 
-string command = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
+bool jsonMode = args.Contains("--json");
+string[] filteredArgs = args.Where(a => a != "--json").ToArray();
+string command = filteredArgs.Length > 0 ? filteredArgs[0].ToLowerInvariant() : "help";
+
+var jsonOptions = new JsonSerializerOptions
+{
+    WriteIndented = true,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+};
 
 switch (command)
 {
@@ -11,7 +21,7 @@ switch (command)
         break;
 
     case "watch":
-        int interval = args.Length > 1 && int.TryParse(args[1], out int ms) ? ms : 500;
+        int interval = filteredArgs.Length > 1 && int.TryParse(filteredArgs[1], out int ms) ? ms : 500;
         RunWatch(interval);
         break;
 
@@ -28,7 +38,7 @@ switch (command)
         break;
 }
 
-static void RunOnce()
+void RunOnce()
 {
     using var attacher = ProcessAttacher.Attach();
     if (attacher is null)
@@ -47,10 +57,10 @@ static void RunOnce()
         return;
     }
 
-    PrintSnapshot(snap);
+    Output(snap);
 }
 
-static void RunWatch(int intervalMs)
+void RunWatch(int intervalMs)
 {
     using var attacher = ProcessAttacher.Attach();
     if (attacher is null)
@@ -59,25 +69,27 @@ static void RunWatch(int intervalMs)
         return;
     }
 
-    Console.WriteLine($"Attached to RIFT (PID {attacher.ProcessId}). Watching every {intervalMs}ms. Ctrl+C to stop.");
+    if (!jsonMode)
+        Console.WriteLine($"Attached to RIFT (PID {attacher.ProcessId}). Watching every {intervalMs}ms. Ctrl+C to stop.");
+
     var scanner = new MemoryScanner(attacher.Handle);
 
     while (true)
     {
-        Console.Clear();
+        if (!jsonMode) Console.Clear();
         var snap = scanner.Read();
         if (snap is null)
-            Console.WriteLine("Waiting for ReaderBridge marker...");
+            Console.WriteLine(jsonMode ? "{}" : "Waiting for ReaderBridge marker...");
         else
-            PrintSnapshot(snap);
+            Output(snap);
 
         Thread.Sleep(intervalMs);
     }
 }
 
-static void RunSmoke()
+void RunSmoke()
 {
-    Console.WriteLine("Running smoke test with synthetic marker...");
+    if (!jsonMode) Console.WriteLine("Running smoke test with synthetic marker...");
 
     const string marker =
         "##READER_DATA##|Arthok|70|Mage|SomeGuild|12500|15000|mana|8900|10000|1234.56|789.01|-45.23|Dragnoth|72|55|hostile|##END_READER##";
@@ -91,11 +103,11 @@ static void RunSmoke()
         return;
     }
 
-    Console.WriteLine("PASS");
-    PrintSnapshot(snap);
+    if (!jsonMode) Console.WriteLine("PASS");
+    Output(snap);
 }
 
-static void InstallAddon()
+void InstallAddon()
 {
     string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     string dest = Path.Combine(docs, "RIFT", "Interface", "Addons", "ReaderBridge");
@@ -124,7 +136,55 @@ static void InstallAddon()
     Console.WriteLine("Restart RIFT or /reloadui to activate.");
 }
 
-static void PrintSnapshot(ReaderSnapshot s)
+void Output(ReaderSnapshot s)
+{
+    if (jsonMode)
+        PrintJson(s);
+    else
+        PrintSnapshot(s);
+}
+
+void PrintJson(ReaderSnapshot s)
+{
+    var obj = new
+    {
+        timestamp = s.Timestamp.ToString("o"),
+        player = new
+        {
+            name     = s.Player.Name,
+            level    = s.Player.Level,
+            calling  = s.Player.Calling,
+            guild    = s.Player.Guild,
+        },
+        hp = new
+        {
+            current = s.Stats.Hp,
+            max     = s.Stats.HpMax,
+        },
+        resource = new
+        {
+            kind    = s.Stats.ResourceKind,
+            current = s.Stats.Resource,
+            max     = s.Stats.ResourceMax,
+        },
+        position = new
+        {
+            x = s.Position.X,
+            y = s.Position.Y,
+            z = s.Position.Z,
+        },
+        target = s.Target is null ? null : new
+        {
+            name     = s.Target.Name,
+            level    = s.Target.Level,
+            hpPct    = s.Target.HpPercent,
+            relation = s.Target.Relation,
+        },
+    };
+    Console.WriteLine(JsonSerializer.Serialize(obj, jsonOptions));
+}
+
+void PrintSnapshot(ReaderSnapshot s)
 {
     Console.WriteLine($"[{s.Timestamp:HH:mm:ss.fff}]");
     Console.WriteLine($"  Player   : {s.Player.Name} (Lvl {s.Player.Level}) {s.Player.Calling} | Guild: {s.Player.Guild ?? "-"}");
@@ -138,13 +198,13 @@ static void PrintSnapshot(ReaderSnapshot s)
         Console.WriteLine($"  Target   : (none)");
 }
 
-static void PrintHelp()
+void PrintHelp()
 {
     Console.WriteLine("Reader - RIFT Memory Reader");
     Console.WriteLine();
     Console.WriteLine("Usage:");
-    Console.WriteLine("  Reader.Cli once                 Single read and print");
-    Console.WriteLine("  Reader.Cli watch [intervalMs]   Continuous watch (default 500ms)");
-    Console.WriteLine("  Reader.Cli smoke                Parse synthetic test data (no RIFT needed)");
-    Console.WriteLine("  Reader.Cli install-addon        Copy ReaderBridge addon to RIFT addons folder");
+    Console.WriteLine("  Reader.Cli once [--json]              Single read and print");
+    Console.WriteLine("  Reader.Cli watch [intervalMs] [--json] Continuous watch (default 500ms)");
+    Console.WriteLine("  Reader.Cli smoke [--json]             Parse synthetic test data (no RIFT needed)");
+    Console.WriteLine("  Reader.Cli install-addon              Copy ReaderBridge addon to RIFT addons folder");
 }
