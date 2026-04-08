@@ -4,7 +4,7 @@ NameShort = "RB"
 Description = "Exports player data as a scannable marker string for external readers."
 Author = "Reader"
 Email = "360madden@gmail.com"
-Version = "0.1.0"
+Version = "0.3.0"
 Environment = "4.4"
 RunOnStartup = {
   "ReaderBridge.lua"
