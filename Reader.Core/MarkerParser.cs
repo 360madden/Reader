@@ -1,214 +1,311 @@
-using System.Text;
 using Reader.Models;
 
 namespace Reader.Core;
 
 /// <summary>
-/// Parses the raw bytes of a ReaderBridge marker string into a <see cref="ReaderSnapshot"/>.
-/// </summary>
-/// <remarks>
-/// Preferred v2 format (13 pipe-delimited fields between markers):
-/// ##READER_V2##|name|level|calling|hpPct|resourceKind|resourcePct|x|y|z|targetName|targetLevel|targetHpPct|targetRelation|##END_READER_V2##
+/// Parses ReaderBridge v3 wire-format buffers into <see cref="ReaderSnapshot"/>.
 ///
-/// Legacy v1 format (16 pipe-delimited fields between markers):
-/// ##READER_DATA##|name|level|calling|guild|hp|hpMax|resourceKind|resource|resourceMax|x|y|z|targetName|targetLevel|targetHpPct|targetRelation|##END_READER##
-/// </remarks>
+/// The format is fixed-offset (see <see cref="V3Layout"/>):
+///
+///   [ MAGIC 8 ][ CONTROL 32 ][ SLOT_A 4176 ][ SLOT_B 4176 ]   = 8392 bytes
+///
+/// Parsing strategy:
+///   1. Verify magic.
+///   2. Read CONTROL block; pick the active slot.
+///   3. Read that slot's fixed 64-byte header (struct-style, no tokenizing).
+///   4. Cross-check slot.seq == control.seq (torn-read guard #1).
+///   5. Verify CRC32 over (SLOT_HDR + body[0..len])           (guard #2).
+///   6. Verify SLOT_END sentinel                              (guard #3).
+///   7. Walk body sections by tag using the `sec` bitmask.
+/// </summary>
 public static class MarkerParser
 {
-    private const string V2StartMarker = "##READER_V2##|";
-    private const string V2EndMarker = "|##END_READER_V2##";
-    private const int V2ExpectedFieldCount = 13;
-
-    private const string V1StartMarker = "##READER_DATA##|";
-    private const string V1EndMarker = "|##END_READER##";
-    private const int V1ExpectedFieldCount = 16;
-
-    private static ReadOnlySpan<byte> V2StartBytes => "##READER_V2##|"u8;
-    private static ReadOnlySpan<byte> V2EndBytes => "##END_READER_V2##"u8;
-    private static ReadOnlySpan<byte> V1StartBytes => "##READER_DATA##|"u8;
-    private static ReadOnlySpan<byte> V1EndBytes => "##END_READER##"u8;
-
-    public static string PreferredStartMarker => V2StartMarker;
-    public static string PreferredEndMarker => V2EndMarker;
-
-    public static ReadOnlySpan<byte> PreferredStartBytes => V2StartBytes;
-    public static ReadOnlySpan<byte> PreferredEndBytes => V2EndBytes;
-    public static ReadOnlySpan<byte> LegacyStartBytes => V1StartBytes;
-    public static ReadOnlySpan<byte> LegacyEndBytes => V1EndBytes;
+    public static ReadOnlySpan<byte> PreferredStartBytes => V3Layout.Magic;
+    public static ReadOnlySpan<byte> PreferredEndBytes   => V3Layout.SlotEnd;
+    public static int PayloadLength => V3Layout.TotalLen;
 
     /// <summary>
-    /// Finds and parses the marker string within a raw memory buffer.
-    /// Prefers v2 if both formats are present.
-    /// Returns null if no supported marker is found or the data is malformed.
+    /// Parses a buffer that starts with the v3 magic. Returns null if the magic
+    /// is missing, the buffer is too small, the CRC fails, or the sentinels do
+    /// not match.
     /// </summary>
     public static ReaderSnapshot? ParseFromBuffer(ReadOnlySpan<byte> buffer)
     {
-        return ParseV2FromBuffer(buffer)
-            ?? ParseV1FromBuffer(buffer);
+        if (buffer.Length < V3Layout.TotalLen) return null;
+        if (!buffer[..V3Layout.MagicLen].SequenceEqual(V3Layout.Magic)) return null;
+
+        var control = buffer.Slice(V3Layout.ControlOff, V3Layout.ControlLen);
+
+        byte active = control[V3Layout.CtrlActiveOff];
+        if (active != (byte)'A' && active != (byte)'B') return null;
+
+        if (!V3Layout.TryParseHexU64(control.Slice(V3Layout.CtrlSeqOff, 16), out ulong ctrlSeq)) return null;
+        if (!V3Layout.TryParseHexU64(control.Slice(V3Layout.CtrlTOff, 12), out ulong ctrlT)) return null;
+
+        int slotOff = active == (byte)'A' ? V3Layout.SlotAOff : V3Layout.SlotBOff;
+        var slot = buffer.Slice(slotOff, V3Layout.SlotLen);
+
+        // Slot header
+        if (slot[0] != (byte)'S' || slot[1] != (byte)'H') return null;
+        if (!V3Layout.TryParseHexU64(slot.Slice(V3Layout.HdrSeqOff, 16), out ulong slotSeq)) return null;
+        if (slotSeq != ctrlSeq) return null; // torn-read guard #1
+
+        if (!V3Layout.TryParseHexU64(slot.Slice(V3Layout.HdrTOff, 12), out ulong slotT)) return null;
+        if (!V3Layout.TryParseHexU32(slot.Slice(V3Layout.HdrFlagsOff, 8), out uint flagsRaw)) return null;
+        if (!V3Layout.TryParseHexU32(slot.Slice(V3Layout.HdrLenOff, 8), out uint bodyLen)) return null;
+        if (!V3Layout.TryParseHexU32(slot.Slice(V3Layout.HdrSecOff, 8), out uint secMask)) return null;
+
+        if (slot[V3Layout.HdrVerOff] != (byte)'0' || slot[V3Layout.HdrVerOff + 1] != V3Layout.VerByte) return null;
+
+        if (bodyLen > V3Layout.SlotBodyMax) return null;
+
+        var body = slot.Slice(V3Layout.BodyOff, (int)bodyLen);
+
+        // CRC verify (guard #2): CRC over (slotHdr + body[0..len])
+        if (!V3Layout.TryParseHexU32(slot.Slice(V3Layout.CrcOff, V3Layout.CrcLen), out uint storedCrc)) return null;
+        Span<byte> crcInput = stackalloc byte[V3Layout.SlotHdrLen + V3Layout.SlotBodyMax];
+        slot[..V3Layout.SlotHdrLen].CopyTo(crcInput);
+        body.CopyTo(crcInput[V3Layout.SlotHdrLen..]);
+        uint computed = Crc32.Compute(crcInput[..(V3Layout.SlotHdrLen + body.Length)]);
+        if (computed != storedCrc) return null;
+
+        // Sentinel (guard #3)
+        if (!slot.Slice(V3Layout.SlotEndOff, V3Layout.SlotEndLen).SequenceEqual(V3Layout.SlotEnd)) return null;
+
+        // Walk sections
+        var sectioned = WalkSections(body, secMask);
+
+        return new ReaderSnapshot(
+            ReaderPayloadVersion.V3,
+            sectioned.Player ?? new PlayerIdentity(null, null, null, null),
+            sectioned.Stats  ?? new PlayerStats(null, null, null, null, null, null, null),
+            sectioned.Position ?? new PlayerPosition(null, null, null),
+            sectioned.Target,
+            DateTimeOffset.UtcNow,
+            Seq:           ctrlSeq,
+            FrameTimeMs:   (long)slotT,
+            Flags:         (ReaderFlags)flagsRaw,
+            PlayerBuffs:   sectioned.PlayerBuffs,
+            PlayerDebuffs: sectioned.PlayerDebuffs,
+            TargetBuffs:   sectioned.TargetBuffs,
+            TargetDebuffs: sectioned.TargetDebuffs,
+            CombatEvents:  sectioned.CombatEvents,
+            Combat:        sectioned.Combat,
+            Zone:          sectioned.Zone);
     }
 
-    private static ReaderSnapshot? ParseV2FromBuffer(ReadOnlySpan<byte> buffer)
+    private struct ParsedSections
     {
-        int start = buffer.IndexOf(V2StartBytes);
-        if (start < 0) return null;
-
-        int dataStart = start + V2StartBytes.Length;
-        ReadOnlySpan<byte> remainder = buffer[dataStart..];
-
-        int end = remainder.IndexOf(V2EndBytes);
-        if (end < 0) return null;
-
-        return ParseV2Fields(remainder[..end]);
+        public PlayerIdentity? Player;
+        public PlayerStats? Stats;
+        public PlayerPosition? Position;
+        public TargetInfo? Target;
+        public ZoneInfo? Zone;
+        public CombatStats? Combat;
+        public List<BuffInfo>? PlayerBuffs;
+        public List<BuffInfo>? PlayerDebuffs;
+        public List<BuffInfo>? TargetBuffs;
+        public List<BuffInfo>? TargetDebuffs;
+        public List<CombatEvent>? CombatEvents;
     }
 
-    private static ReaderSnapshot? ParseV1FromBuffer(ReadOnlySpan<byte> buffer)
+    private static ParsedSections WalkSections(ReadOnlySpan<byte> body, uint secMask)
     {
-        int start = buffer.IndexOf(V1StartBytes);
-        if (start < 0) return null;
-
-        int dataStart = start + V1StartBytes.Length;
-        ReadOnlySpan<byte> remainder = buffer[dataStart..];
-
-        int end = remainder.IndexOf(V1EndBytes);
-        if (end < 0) return null;
-
-        return ParseV1Fields(remainder[..end]);
-    }
-
-    /// <summary>
-    /// Parses a v2 field block (content between markers, excluding the markers themselves).
-    /// </summary>
-    public static ReaderSnapshot? ParseV2Fields(ReadOnlySpan<byte> fieldBytes)
-    {
-        Span<Range> ranges = stackalloc Range[V2ExpectedFieldCount + 2];
-        int count = SplitOnPipe(fieldBytes, ranges);
-
-        if (count < V2ExpectedFieldCount) return null;
-
-        string? name            = GetString(fieldBytes, ranges[0]);
-        int?    level           = GetInt(fieldBytes, ranges[1]);
-        string? calling         = GetString(fieldBytes, ranges[2]);
-        int?    hpPercent       = GetInt(fieldBytes, ranges[3]);
-        string? resourceKind    = GetString(fieldBytes, ranges[4]);
-        int?    resourcePercent = GetInt(fieldBytes, ranges[5]);
-        float?  x               = GetFloat(fieldBytes, ranges[6]);
-        float?  y               = GetFloat(fieldBytes, ranges[7]);
-        float?  z               = GetFloat(fieldBytes, ranges[8]);
-        string? targetName      = GetString(fieldBytes, ranges[9]);
-        int?    targetLevel     = GetInt(fieldBytes, ranges[10]);
-        int?    targetHpPct     = GetInt(fieldBytes, ranges[11]);
-        string? targetRel       = GetString(fieldBytes, ranges[12]);
-
-        var identity = new PlayerIdentity(name, level, calling, Guild: null);
-        var stats = new PlayerStats(
-            Hp: null,
-            HpMax: null,
-            HpPercent: hpPercent,
-            ResourceKind: resourceKind,
-            Resource: null,
-            ResourceMax: null,
-            ResourcePercent: resourcePercent);
-        var position = new PlayerPosition(x, y, z);
-
-        TargetInfo? target = targetName is not null
-            ? new TargetInfo(targetName, targetLevel, targetHpPct, targetRel)
-            : null;
-
-        return new ReaderSnapshot(ReaderPayloadVersion.V2, identity, stats, position, target, DateTimeOffset.UtcNow);
-    }
-
-    /// <summary>
-    /// Parses a v1 field block (content between markers, excluding the markers themselves).
-    /// </summary>
-    public static ReaderSnapshot? ParseV1Fields(ReadOnlySpan<byte> fieldBytes)
-    {
-        Span<Range> ranges = stackalloc Range[V1ExpectedFieldCount + 2];
-        int count = SplitOnPipe(fieldBytes, ranges);
-
-        if (count < V1ExpectedFieldCount) return null;
-
-        string? name         = GetString(fieldBytes, ranges[0]);
-        int?    level        = GetInt(fieldBytes, ranges[1]);
-        string? calling      = GetString(fieldBytes, ranges[2]);
-        string? guild        = GetString(fieldBytes, ranges[3]);
-        int?    hp           = GetInt(fieldBytes, ranges[4]);
-        int?    hpMax        = GetInt(fieldBytes, ranges[5]);
-        string? resourceKind = GetString(fieldBytes, ranges[6]);
-        int?    resource     = GetInt(fieldBytes, ranges[7]);
-        int?    resourceMax  = GetInt(fieldBytes, ranges[8]);
-        float?  x            = GetFloat(fieldBytes, ranges[9]);
-        float?  y            = GetFloat(fieldBytes, ranges[10]);
-        float?  z            = GetFloat(fieldBytes, ranges[11]);
-        string? targetName   = GetString(fieldBytes, ranges[12]);
-        int?    targetLevel  = GetInt(fieldBytes, ranges[13]);
-        int?    targetHpPct  = GetInt(fieldBytes, ranges[14]);
-        string? targetRel    = GetString(fieldBytes, ranges[15]);
-
-        int? hpPercent = ComputePercent(hp, hpMax);
-        int? resourcePercent = ComputePercent(resource, resourceMax);
-
-        var identity = new PlayerIdentity(name, level, calling, guild);
-        var stats = new PlayerStats(
-            Hp: hp,
-            HpMax: hpMax,
-            HpPercent: hpPercent,
-            ResourceKind: resourceKind,
-            Resource: resource,
-            ResourceMax: resourceMax,
-            ResourcePercent: resourcePercent);
-        var position = new PlayerPosition(x, y, z);
-
-        TargetInfo? target = targetName is not null
-            ? new TargetInfo(targetName, targetLevel, targetHpPct, targetRel)
-            : null;
-
-        return new ReaderSnapshot(ReaderPayloadVersion.V1, identity, stats, position, target, DateTimeOffset.UtcNow);
-    }
-
-    private static int? ComputePercent(int? current, int? max)
-    {
-        if (current is null || max is null || max <= 0) return null;
-        return (int)Math.Round((double)current.Value * 100d / max.Value, MidpointRounding.AwayFromZero);
-    }
-
-    private static string? GetString(ReadOnlySpan<byte> data, Range range)
-    {
-        ReadOnlySpan<byte> slice = data[range];
-        if (slice.IsEmpty) return null;
-        return Encoding.UTF8.GetString(slice);
-    }
-
-    private static int? GetInt(ReadOnlySpan<byte> data, Range range)
-    {
-        ReadOnlySpan<byte> slice = data[range];
-        if (slice.IsEmpty) return null;
-        string s = Encoding.ASCII.GetString(slice);
-        return int.TryParse(s, out int v) ? v : null;
-    }
-
-    private static float? GetFloat(ReadOnlySpan<byte> data, Range range)
-    {
-        ReadOnlySpan<byte> slice = data[range];
-        if (slice.IsEmpty) return null;
-        string s = Encoding.ASCII.GetString(slice);
-        return float.TryParse(s, System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : null;
-    }
-
-    private static int SplitOnPipe(ReadOnlySpan<byte> data, Span<Range> ranges)
-    {
-        int count = 0;
-        int start = 0;
-        for (int i = 0; i < data.Length && count < ranges.Length - 1; i++)
+        var result = new ParsedSections();
+        int pos = 0;
+        while (pos < body.Length)
         {
-            if (data[i] == (byte)'|')
+            if (pos + 9 > body.Length) break;
+            byte tag = body[pos];
+            // Stop scanning if we hit padding (`.`).
+            if (tag == (byte)'.') break;
+            if (!V3Layout.TryParseHexU32(body.Slice(pos + 1, 8), out uint sectionLen)) break;
+            int payloadStart = pos + 9;
+            if (payloadStart + sectionLen > body.Length) break;
+            var payload = body.Slice(payloadStart, (int)sectionLen);
+
+            switch ((char)tag)
             {
-                ranges[count++] = new Range(start, i);
-                start = i + 1;
+                case 'P': ParsePlayer(payload, ref result); break;
+                case 'T': ParseTarget(payload, ref result); break;
+                case 'Z': ParseZone(payload, ref result); break;
+                case 'S': ParseStats(payload, ref result); break;
+                case 'B': result.PlayerBuffs   = ParseBuffList(payload); break;
+                case 'D': result.PlayerDebuffs = ParseBuffList(payload); break;
+                case 'b': result.TargetBuffs   = ParseBuffList(payload); break;
+                case 'd': result.TargetDebuffs = ParseBuffList(payload); break;
+                case 'C': result.CombatEvents  = ParseCombatList(payload); break;
+            }
+
+            pos = payloadStart + (int)sectionLen;
+        }
+        _ = secMask; // mask is informational; the walker is self-describing.
+        return result;
+    }
+
+    private static void ParsePlayer(ReadOnlySpan<byte> payload, ref ParsedSections result)
+    {
+        string? name = null, calling = null, guild = null, resKind = null;
+        int? level = null, hp = null, hpMax = null, hpPct = null;
+        int? resCur = null, resMax = null, resPct = null;
+        float? x = null, y = null, z = null;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            switch (KeyOf(k))
+            {
+                case "name":    name    = V3SectionWalker.DecodeString(v); break;
+                case "level":   level   = V3SectionWalker.DecodeInt(v);    break;
+                case "calling": calling = V3SectionWalker.DecodeString(v); break;
+                case "guild":   guild   = V3SectionWalker.DecodeString(v); break;
+                case "hp":      hp      = V3SectionWalker.DecodeInt(v);    break;
+                case "hpMax":   hpMax   = V3SectionWalker.DecodeInt(v);    break;
+                case "hpPct":   hpPct   = V3SectionWalker.DecodeInt(v);    break;
+                case "resKind": resKind = V3SectionWalker.DecodeString(v); break;
+                case "resCur":  resCur  = V3SectionWalker.DecodeInt(v);    break;
+                case "resMax":  resMax  = V3SectionWalker.DecodeInt(v);    break;
+                case "resPct":  resPct  = V3SectionWalker.DecodeInt(v);    break;
+                case "x":       x       = V3SectionWalker.DecodeFloat(v);  break;
+                case "y":       y       = V3SectionWalker.DecodeFloat(v);  break;
+                case "z":       z       = V3SectionWalker.DecodeFloat(v);  break;
             }
         }
-        if (count < ranges.Length)
-            ranges[count++] = new Range(start, data.Length);
-        return count;
+
+        result.Player = new PlayerIdentity(
+            string.IsNullOrEmpty(name) ? null : name,
+            level,
+            string.IsNullOrEmpty(calling) ? null : calling,
+            string.IsNullOrEmpty(guild) ? null : guild);
+        result.Stats = new PlayerStats(hp, hpMax, hpPct, string.IsNullOrEmpty(resKind) ? null : resKind, resCur, resMax, resPct);
+        result.Position = new PlayerPosition(x, y, z);
     }
+
+    private static void ParseTarget(ReadOnlySpan<byte> payload, ref ParsedSections result)
+    {
+        string? name = null, rel = null;
+        int? level = null, hpPct = null;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            switch (KeyOf(k))
+            {
+                case "name":  name  = V3SectionWalker.DecodeString(v); break;
+                case "level": level = V3SectionWalker.DecodeInt(v);    break;
+                case "hpPct": hpPct = V3SectionWalker.DecodeInt(v);    break;
+                case "rel":   rel   = V3SectionWalker.DecodeString(v); break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(name))
+            result.Target = new TargetInfo(name, level, hpPct, rel);
+    }
+
+    private static void ParseZone(ReadOnlySpan<byte> payload, ref ParsedSections result)
+    {
+        int id = 0;
+        string name = "";
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            switch (KeyOf(k))
+            {
+                case "id":   id   = V3SectionWalker.DecodeInt(v) ?? 0; break;
+                case "name": name = V3SectionWalker.DecodeString(v);   break;
+            }
+        }
+        result.Zone = new ZoneInfo(id, name);
+    }
+
+    private static void ParseStats(ReadOnlySpan<byte> payload, ref ParsedSections result)
+    {
+        double dps1 = 0, dps5 = 0, hps1 = 0, hps5 = 0, in1 = 0, in5 = 0;
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            switch (KeyOf(k))
+            {
+                case "dps1s": dps1 = V3SectionWalker.DecodeDouble(v) ?? 0; break;
+                case "dps5s": dps5 = V3SectionWalker.DecodeDouble(v) ?? 0; break;
+                case "hps1s": hps1 = V3SectionWalker.DecodeDouble(v) ?? 0; break;
+                case "hps5s": hps5 = V3SectionWalker.DecodeDouble(v) ?? 0; break;
+                case "in1s":  in1  = V3SectionWalker.DecodeDouble(v) ?? 0; break;
+                case "in5s":  in5  = V3SectionWalker.DecodeDouble(v) ?? 0; break;
+            }
+        }
+        result.Combat = new CombatStats(dps1, dps5, hps1, hps5, in1, in5);
+    }
+
+    private static List<BuffInfo> ParseBuffList(ReadOnlySpan<byte> payload)
+    {
+        var list = new List<BuffInfo>();
+        int? id = null, stacks = null, rem = null;
+        bool self = false;
+        string nm = "";
+        bool inEntry = false;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            string key = KeyOf(k);
+            if (key == "n") continue;
+            if (key == "id")
+            {
+                if (inEntry)
+                {
+                    list.Add(new BuffInfo(id ?? 0, nm, stacks ?? 0, rem ?? 0, self));
+                    nm = ""; stacks = null; rem = null; self = false;
+                }
+                id = V3SectionWalker.DecodeInt(v);
+                inEntry = true;
+            }
+            else if (key == "nm")   nm     = V3SectionWalker.DecodeString(v);
+            else if (key == "stk")  stacks = V3SectionWalker.DecodeInt(v);
+            else if (key == "rem")  rem    = V3SectionWalker.DecodeInt(v);
+            else if (key == "self") self   = V3SectionWalker.DecodeBool(v);
+        }
+        if (inEntry)
+            list.Add(new BuffInfo(id ?? 0, nm, stacks ?? 0, rem ?? 0, self));
+        return list;
+    }
+
+    private static List<CombatEvent> ParseCombatList(ReadOnlySpan<byte> payload)
+    {
+        var list = new List<CombatEvent>();
+        long t = 0; int abi = 0, amt = 0, abs = 0;
+        bool crit = false;
+        string src = "", dst = "", ty = "";
+        bool inEntry = false;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            string key = KeyOf(k);
+            if (key == "n") continue;
+            if (key == "t")
+            {
+                if (inEntry)
+                {
+                    list.Add(new CombatEvent(t, src, dst, abi, ty, amt, crit, abs));
+                    src = ""; dst = ""; ty = ""; abi = 0; amt = 0; abs = 0; crit = false;
+                }
+                t = V3SectionWalker.DecodeLong(v) ?? 0;
+                inEntry = true;
+            }
+            else if (key == "src")  src  = V3SectionWalker.DecodeString(v);
+            else if (key == "dst")  dst  = V3SectionWalker.DecodeString(v);
+            else if (key == "abi")  abi  = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "ty")   ty   = V3SectionWalker.DecodeString(v);
+            else if (key == "amt")  amt  = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "crit") crit = V3SectionWalker.DecodeBool(v);
+            else if (key == "abs")  abs  = V3SectionWalker.DecodeInt(v) ?? 0;
+        }
+        if (inEntry)
+            list.Add(new CombatEvent(t, src, dst, abi, ty, amt, crit, abs));
+        return list;
+    }
+
+    private static string KeyOf(ReadOnlySpan<byte> bytes)
+        => System.Text.Encoding.ASCII.GetString(bytes);
 }

@@ -5,26 +5,34 @@ using Reader.Models;
 namespace Reader.Core;
 
 /// <summary>
-/// Scans the RIFT process memory for the ReaderBridge marker string and parses it.
+/// Scans the RIFT process memory for the v3 ReaderBridge payload.
+///
+/// The v3 payload is always exactly <see cref="V3Layout.TotalLen"/> bytes
+/// (8392), starts with the 8-byte <see cref="V3Layout.Magic"/>, and ends with
+/// the <see cref="V3Layout.SlotEnd"/> sentinel inside the active slot. Because
+/// the byte length is fixed, the Lua string allocator frequently reuses the
+/// same heap slot across publishes, so the cached address hits on most reads
+/// with zero rescan cost.
+///
+/// Lookup strategy (in priority order):
+///   1. Stable-address fast path: read <see cref="V3Layout.TotalLen"/> bytes at
+///      the cached address. If the magic matches, parse and return.
+///   2. Small-window rescan: read ±<see cref="RescanWindow"/> bytes around the
+///      cached address. New strings tend to be allocated near old ones in
+///      Lua's GC heap.
+///   3. Full scan: enumerate readable regions via VirtualQueryEx and search
+///      each for the magic.
 /// </summary>
 public sealed class MemoryScanner
 {
-    // Largest contiguous read we'll attempt per region (4 MB)
-    private const int MaxReadSize = 4 * 1024 * 1024;
-
-    // Max bytes to read once the marker start address is known
-    private const int MarkerReadSize = 4096;
-
-    // The real marker is ~200 bytes. If end marker is further than this, it's a false match.
-    private const int MaxMarkerLength = 1024;
+    private const int RescanWindow = 2 * 1024 * 1024;     // ±2 MB
+    private const int FullScanRegionMax = 4 * 1024 * 1024; // 4 MB chunks
 
     private readonly nint _handle;
 
-    // Cached address of the last-found marker start (0 = not cached)
     private nuint _cachedAddress;
 
-    private static ReadOnlySpan<byte> StartMarker => "##READER_DATA##|"u8;
-    private static ReadOnlySpan<byte> EndMarker   => "##END_READER##"u8;
+    public ScannerStats Stats { get; } = new();
 
     public MemoryScanner(nint processHandle)
     {
@@ -32,25 +40,54 @@ public sealed class MemoryScanner
     }
 
     /// <summary>
-    /// Reads the latest ReaderBridge snapshot from process memory.
-    /// Returns null if the marker is not found or the addon is not active.
+    /// Reads the latest v3 snapshot. Returns null if the addon is not loaded
+    /// or no valid payload was found.
     /// </summary>
     public ReaderSnapshot? Read()
     {
-        // Try cached address first
+        // 1. Stable-address fast path
         if (_cachedAddress != 0)
         {
-            byte[]? cached = ReadAt(_cachedAddress, MarkerReadSize);
-            if (cached is not null)
+            byte[]? buf = ReadAt(_cachedAddress, V3Layout.TotalLen);
+            if (buf is not null && buf.Length >= V3Layout.MagicLen
+                && buf.AsSpan(0, V3Layout.MagicLen).SequenceEqual(V3Layout.Magic))
             {
-                var snap = TryParseAndValidate(cached);
-                if (snap is not null) return snap;
+                var snap = MarkerParser.ParseFromBuffer(buf);
+                if (snap is not null)
+                {
+                    Stats.StableHits++;
+                    return snap;
+                }
+                Stats.CrcFailures++;
             }
-            // Cache miss — do a full scan
+
+            // 2. Small-window rescan
+            var windowSnap = SmallWindowRescan(_cachedAddress);
+            if (windowSnap is not null)
+            {
+                Stats.SmallWindowHits++;
+                return windowSnap;
+            }
+
             _cachedAddress = 0;
         }
 
-        return FullScan();
+        // 3. Full scan
+        var fullSnap = FullScan();
+        if (fullSnap is not null)
+            Stats.FullScanHits++;
+        return fullSnap;
+    }
+
+    private ReaderSnapshot? SmallWindowRescan(nuint cached)
+    {
+        nuint windowStart = cached > (nuint)RescanWindow ? cached - (nuint)RescanWindow : 0;
+        int windowSize = RescanWindow * 2 + V3Layout.TotalLen;
+
+        byte[]? buf = ReadAt(windowStart, windowSize);
+        if (buf is null) return null;
+
+        return SearchAndParse(buf, windowStart);
     }
 
     private ReaderSnapshot? FullScan()
@@ -71,8 +108,13 @@ public sealed class MemoryScanner
 
             if (IsReadable(mbi))
             {
-                var result = ScanRegion(mbi.BaseAddress, (int)Math.Min(mbi.RegionSize, (nuint)MaxReadSize));
-                if (result is not null) return result;
+                int regionSize = (int)Math.Min(mbi.RegionSize, (nuint)FullScanRegionMax);
+                byte[]? buf = ReadAt(mbi.BaseAddress, regionSize);
+                if (buf is not null)
+                {
+                    var snap = SearchAndParse(buf, mbi.BaseAddress);
+                    if (snap is not null) return snap;
+                }
             }
 
             if (regionEnd <= address) break;
@@ -82,66 +124,40 @@ public sealed class MemoryScanner
         return null;
     }
 
-    private ReaderSnapshot? ScanRegion(nuint baseAddress, int size)
+    private ReaderSnapshot? SearchAndParse(ReadOnlySpan<byte> buf, nuint baseAddress)
     {
-        byte[]? buf = ReadAt(baseAddress, size);
-        if (buf is null) return null;
-
-        ReadOnlySpan<byte> span = buf;
+        var magic = V3Layout.Magic;
         int searchFrom = 0;
-
-        // Iterate through ALL occurrences of the start marker in this region.
-        // The first match is often the Lua source code literal — skip it.
-        while (searchFrom < span.Length)
+        while (searchFrom + V3Layout.TotalLen <= buf.Length)
         {
-            int idx = span[searchFrom..].IndexOf(StartMarker);
+            int idx = buf[searchFrom..].IndexOf(magic);
             if (idx < 0) break;
+            int abs = searchFrom + idx;
 
-            int absoluteIdx = searchFrom + idx;
-
-            // Check that the end marker is within a reasonable distance
-            ReadOnlySpan<byte> candidate = span.Slice(absoluteIdx, Math.Min(MaxMarkerLength, span.Length - absoluteIdx));
-            int endIdx = candidate.IndexOf(EndMarker);
-
-            if (endIdx > 0)
+            if (abs + V3Layout.TotalLen <= buf.Length)
             {
-                var snap = TryParseAndValidate(candidate[..( endIdx + EndMarker.Length)]);
-                if (snap is not null)
+                var candidate = buf.Slice(abs, V3Layout.TotalLen);
+
+                // Cheap fingerprint reject: SLOT_END must be at one of the two known offsets.
+                bool slotAEnd = candidate.Slice(V3Layout.SlotAOff + V3Layout.SlotEndOff, V3Layout.SlotEndLen)
+                                         .SequenceEqual(V3Layout.SlotEnd);
+                bool slotBEnd = candidate.Slice(V3Layout.SlotBOff + V3Layout.SlotEndOff, V3Layout.SlotEndLen)
+                                         .SequenceEqual(V3Layout.SlotEnd);
+                if (slotAEnd && slotBEnd)
                 {
-                    _cachedAddress = baseAddress + (nuint)absoluteIdx;
-                    return snap;
+                    var snap = MarkerParser.ParseFromBuffer(candidate);
+                    if (snap is not null)
+                    {
+                        _cachedAddress = baseAddress + (nuint)abs;
+                        return snap;
+                    }
                 }
             }
 
-            // This match was a false positive (source literal, garbage, etc.) — skip past it
-            searchFrom = absoluteIdx + StartMarker.Length;
+            searchFrom = abs + V3Layout.MagicLen;
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Parses the buffer and validates the result is real player data, not source code garbage.
-    /// </summary>
-    private static ReaderSnapshot? TryParseAndValidate(ReadOnlySpan<byte> buffer)
-    {
-        var snap = MarkerParser.ParseFromBuffer(buffer);
-        if (snap is null) return null;
-
-        // Validate: player name must exist and contain only printable characters
-        if (string.IsNullOrEmpty(snap.Player.Name)) return null;
-        foreach (char c in snap.Player.Name)
-        {
-            if (char.IsControl(c)) return null;
-        }
-
-        // Validate: level must be a reasonable value (1-70 for RIFT)
-        if (snap.Player.Level is null or < 1 or > 70) return null;
-
-        // Validate: HP values should be non-negative if present
-        if (snap.Stats.Hp < 0 || snap.Stats.HpMax < 0) return null;
-
-        return snap;
     }
 
     private unsafe byte[]? ReadAt(nuint address, int size)
@@ -167,12 +183,22 @@ public sealed class MemoryScanner
 
     private static bool IsReadable(in MemoryBasicInformation mbi)
     {
-        if (mbi.State != Kernel32.MemCommit) return false;
+        const uint MEM_COMMIT = 0x1000;
+        const uint PAGE_NOACCESS = 0x01;
+        const uint PAGE_GUARD = 0x100;
 
-        uint protect = mbi.Protect;
-        if ((protect & Kernel32.PageNoAccess) != 0) return false;
-        if ((protect & Kernel32.PageGuard) != 0) return false;
-
+        if (mbi.State != MEM_COMMIT) return false;
+        if ((mbi.Protect & PAGE_NOACCESS) != 0) return false;
+        if ((mbi.Protect & PAGE_GUARD) != 0) return false;
         return true;
     }
+}
+
+public sealed class ScannerStats
+{
+    public long StableHits;
+    public long SmallWindowHits;
+    public long FullScanHits;
+    public long CrcFailures;
+    public long TornReadRetries;
 }

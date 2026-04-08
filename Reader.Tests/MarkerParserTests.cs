@@ -1,4 +1,3 @@
-using System.Text;
 using Reader.Core;
 using Reader.Models;
 
@@ -6,99 +5,176 @@ namespace Reader.Tests;
 
 public class MarkerParserTests
 {
-    private static readonly string FullMarker =
-        "##READER_DATA##|Arthok|70|Mage|SomeGuild|12500|15000|mana|8900|10000|1234.56|789.01|-45.23|Dragnoth|72|55|hostile|##END_READER##";
+    private static ReaderSnapshot SampleSnapshot() => new(
+        ReaderPayloadVersion.V3,
+        new PlayerIdentity("Arthok", 70, "Mage", "Pipes|And;Equals=InGuild"),
+        new PlayerStats(12500, 15000, 83, "mana", 8900, 10000, 89),
+        new PlayerPosition(1234.56f, 789.01f, -45.23f),
+        new TargetInfo("Dragnoth", 72, 55, "hostile"),
+        DateTimeOffset.UtcNow,
+        Seq: 0xDEADBEEFCAFE,
+        FrameTimeMs: 0x123456,
+        Flags: ReaderFlags.HasTarget | ReaderFlags.InCombat,
+        Combat: new CombatStats(2150.5, 1980.2, 0, 0, 350.1, 280.4),
+        Zone: new ZoneInfo(38, "Mathosia"));
 
-    private static byte[] Bytes(string s) => Encoding.UTF8.GetBytes(s);
-
-    [Fact]
-    public void ParseFromBuffer_FullMarker_ReturnsCorrectSnapshot()
+    private static byte[] BuildValid(ulong seq = 0xDEADBEEFCAFE, char active = 'A')
     {
-        var snapshot = MarkerParser.ParseFromBuffer(Bytes(FullMarker));
-
-        Assert.NotNull(snapshot);
-        Assert.Equal("Arthok", snapshot.Player.Name);
-        Assert.Equal(70, snapshot.Player.Level);
-        Assert.Equal("Mage", snapshot.Player.Calling);
-        Assert.Equal("SomeGuild", snapshot.Player.Guild);
-
-        Assert.Equal(12500, snapshot.Stats.Hp);
-        Assert.Equal(15000, snapshot.Stats.HpMax);
-        Assert.Equal("mana", snapshot.Stats.ResourceKind);
-        Assert.Equal(8900, snapshot.Stats.Resource);
-        Assert.Equal(10000, snapshot.Stats.ResourceMax);
-
-        Assert.Equal(1234.56f, snapshot.Position.X!.Value, precision: 2);
-        Assert.Equal(789.01f, snapshot.Position.Y!.Value, precision: 2);
-        Assert.Equal(-45.23f, snapshot.Position.Z!.Value, precision: 2);
-
-        Assert.NotNull(snapshot.Target);
-        Assert.Equal("Dragnoth", snapshot.Target.Name);
-        Assert.Equal(72, snapshot.Target.Level);
-        Assert.Equal(55, snapshot.Target.HpPercent);
-        Assert.Equal("hostile", snapshot.Target.Relation);
+        var enc = new V3Encoder();
+        return enc.Build(seq, frameTimeMs: 0x123456, flags: ReaderFlags.HasTarget | ReaderFlags.InCombat, active, SampleSnapshot());
     }
 
     [Fact]
-    public void ParseFromBuffer_MarkerEmbeddedInLargerBuffer_ReturnsCorrectSnapshot()
+    public void ParseFromBuffer_ValidV3_RoundTripsAllSections()
     {
-        // Simulate the marker appearing partway through a large memory buffer
-        byte[] prefix = new byte[256];
-        byte[] suffix = new byte[128];
-        byte[] marker = Bytes(FullMarker);
-        byte[] buffer = [.. prefix, .. marker, .. suffix];
+        var snap = MarkerParser.ParseFromBuffer(BuildValid());
 
-        var snapshot = MarkerParser.ParseFromBuffer(buffer);
+        Assert.NotNull(snap);
+        Assert.Equal(ReaderPayloadVersion.V3, snap.PayloadVersion);
+        Assert.Equal(0xDEADBEEFCAFEul, snap.Seq);
+        Assert.Equal(0x123456L, snap.FrameTimeMs);
+        Assert.Equal(ReaderFlags.HasTarget | ReaderFlags.InCombat, snap.Flags);
 
-        Assert.NotNull(snapshot);
-        Assert.Equal("Arthok", snapshot.Player.Name);
+        Assert.Equal("Arthok", snap.Player.Name);
+        Assert.Equal(70, snap.Player.Level);
+        Assert.Equal("Mage", snap.Player.Calling);
+        Assert.Equal("Pipes|And;Equals=InGuild", snap.Player.Guild);
+
+        Assert.Equal(12500, snap.Stats.Hp);
+        Assert.Equal(15000, snap.Stats.HpMax);
+        Assert.Equal(83, snap.Stats.HpPercent);
+        Assert.Equal("mana", snap.Stats.ResourceKind);
+        Assert.Equal(8900, snap.Stats.Resource);
+        Assert.Equal(10000, snap.Stats.ResourceMax);
+        Assert.Equal(89, snap.Stats.ResourcePercent);
+
+        Assert.Equal(1234.56f, snap.Position.X!.Value, precision: 2);
+        Assert.Equal(789.01f, snap.Position.Y!.Value, precision: 2);
+        Assert.Equal(-45.23f, snap.Position.Z!.Value, precision: 2);
+
+        Assert.NotNull(snap.Target);
+        Assert.Equal("Dragnoth", snap.Target.Name);
+        Assert.Equal(72, snap.Target.Level);
+        Assert.Equal(55, snap.Target.HpPercent);
+        Assert.Equal("hostile", snap.Target.Relation);
+
+        Assert.NotNull(snap.Zone);
+        Assert.Equal(38, snap.Zone.Id);
+        Assert.Equal("Mathosia", snap.Zone.Name);
+
+        Assert.NotNull(snap.Combat);
+        Assert.Equal(2150.5, snap.Combat.Dps1s, precision: 2);
     }
 
     [Fact]
-    public void ParseFromBuffer_NoTarget_ReturnsNullTarget()
+    public void ParseFromBuffer_BothActiveSlots_ParseEquivalently()
     {
-        string marker = "##READER_DATA##|Arthok|70|Mage||12500|15000|mana|8900|10000|1234.56|789.01|-45.23||||##END_READER##";
-        var snapshot = MarkerParser.ParseFromBuffer(Bytes(marker));
+        var snapA = MarkerParser.ParseFromBuffer(BuildValid(active: 'A'));
+        var snapB = MarkerParser.ParseFromBuffer(BuildValid(active: 'B'));
 
-        Assert.NotNull(snapshot);
-        Assert.Null(snapshot.Target);
-        Assert.Null(snapshot.Player.Guild);
+        Assert.NotNull(snapA);
+        Assert.NotNull(snapB);
+        Assert.Equal(snapA.Player.Name, snapB.Player.Name);
+        Assert.Equal(snapA.Seq, snapB.Seq);
     }
 
     [Fact]
-    public void ParseFromBuffer_NoMarker_ReturnsNull()
+    public void ParseFromBuffer_LengthPrefixedString_AllowsEmbeddedDelimiters()
     {
-        byte[] buffer = Bytes("just some random bytes in memory");
-        Assert.Null(MarkerParser.ParseFromBuffer(buffer));
+        var snap = MarkerParser.ParseFromBuffer(BuildValid());
+        // The sample guild contains '|', ';', and '=' which would break naive splitting.
+        Assert.Equal("Pipes|And;Equals=InGuild", snap!.Player.Guild);
     }
 
     [Fact]
-    public void ParseFromBuffer_MissingEndMarker_ReturnsNull()
+    public void ParseFromBuffer_NoMagic_ReturnsNull()
     {
-        string truncated = "##READER_DATA##|Arthok|70|Mage||12500|15000|mana|8900|10000|1234.56|789.01|-45.23||||";
-        Assert.Null(MarkerParser.ParseFromBuffer(Bytes(truncated)));
+        byte[] buf = new byte[V3Layout.TotalLen];
+        Assert.Null(MarkerParser.ParseFromBuffer(buf));
     }
 
     [Fact]
-    public void ParseFromBuffer_TooFewFields_ReturnsNull()
+    public void ParseFromBuffer_BufferTooSmall_ReturnsNull()
     {
-        string bad = "##READER_DATA##|Arthok|70|##END_READER##";
-        Assert.Null(MarkerParser.ParseFromBuffer(Bytes(bad)));
+        Assert.Null(MarkerParser.ParseFromBuffer(new byte[V3Layout.TotalLen - 1]));
     }
 
     [Fact]
-    public void ParseFromBuffer_NonAsciiName_ParsesCorrectly()
+    public void ParseFromBuffer_CrcMismatch_ReturnsNull()
     {
-        string marker = "##READER_DATA##|Ärthök|70|Warrior||5000|5000|energy|100|100|0.00|0.00|0.00||||##END_READER##";
-        var snapshot = MarkerParser.ParseFromBuffer(Bytes(marker));
-
-        Assert.NotNull(snapshot);
-        Assert.Equal("Ärthök", snapshot.Player.Name);
+        byte[] buf = BuildValid();
+        // Flip a byte inside slot A's body — CRC must fail.
+        buf[V3Layout.SlotAOff + V3Layout.BodyOff + 5] ^= 0xFF;
+        Assert.Null(MarkerParser.ParseFromBuffer(buf));
     }
 
     [Fact]
-    public void ParseFromBuffer_EmptyBuffer_ReturnsNull()
+    public void ParseFromBuffer_TornRead_SeqMismatch_ReturnsNull()
     {
-        Assert.Null(MarkerParser.ParseFromBuffer([]));
+        byte[] buf = BuildValid();
+        // Corrupt the control-block seq so it no longer matches the slot's seq.
+        buf[V3Layout.ControlOff + V3Layout.CtrlSeqOff] = (byte)'F';
+        buf[V3Layout.ControlOff + V3Layout.CtrlSeqOff + 1] = (byte)'F';
+        Assert.Null(MarkerParser.ParseFromBuffer(buf));
+    }
+
+    [Fact]
+    public void ParseFromBuffer_BadVersionByte_ReturnsNull()
+    {
+        byte[] buf = BuildValid();
+        buf[V3Layout.SlotAOff + V3Layout.HdrVerOff + 1] = (byte)'9';
+        Assert.Null(MarkerParser.ParseFromBuffer(buf));
+    }
+
+    [Fact]
+    public void ParseFromBuffer_BadActiveByte_ReturnsNull()
+    {
+        byte[] buf = BuildValid();
+        buf[V3Layout.ControlOff + V3Layout.CtrlActiveOff] = (byte)'X';
+        Assert.Null(MarkerParser.ParseFromBuffer(buf));
+    }
+
+    [Fact]
+    public void ParseFromBuffer_SentinelClobbered_ReturnsNull()
+    {
+        byte[] buf = BuildValid();
+        buf[V3Layout.SlotAOff + V3Layout.SlotEndOff] = 0;
+        Assert.Null(MarkerParser.ParseFromBuffer(buf));
+    }
+
+    [Fact]
+    public void V3Encoder_TotalLength_AlwaysFixed()
+    {
+        var enc = new V3Encoder();
+        var bigBuffs = Enumerable.Range(0, 50)
+            .Select(i => new BuffInfo(i, $"Buff{i}", 1, 30000, true))
+            .ToList();
+        var snap = SampleSnapshot() with { PlayerBuffs = bigBuffs };
+        byte[] buf = enc.Build(seq: 1, frameTimeMs: 0, flags: ReaderFlags.None, 'A', snap);
+        Assert.Equal(V3Layout.TotalLen, buf.Length);
+    }
+
+    [Fact]
+    public void V3Encoder_BuffList_RoundTrips()
+    {
+        var enc = new V3Encoder();
+        var buffs = new List<BuffInfo>
+        {
+            new(101, "Quickness", 1, 12000, true),
+            new(202, "Burning", 3, 8000, false),
+        };
+        var snap = SampleSnapshot() with { PlayerBuffs = buffs };
+        byte[] buf = enc.Build(seq: 7, frameTimeMs: 99, flags: ReaderFlags.None, 'A', snap);
+        var parsed = MarkerParser.ParseFromBuffer(buf);
+
+        Assert.NotNull(parsed);
+        Assert.NotNull(parsed.PlayerBuffs);
+        Assert.Equal(2, parsed.PlayerBuffs.Count);
+        Assert.Equal(101, parsed.PlayerBuffs[0].Id);
+        Assert.Equal("Quickness", parsed.PlayerBuffs[0].Name);
+        Assert.True(parsed.PlayerBuffs[0].CasterIsSelf);
+        Assert.Equal(202, parsed.PlayerBuffs[1].Id);
+        Assert.Equal(3, parsed.PlayerBuffs[1].Stacks);
+        Assert.False(parsed.PlayerBuffs[1].CasterIsSelf);
     }
 }

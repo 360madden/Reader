@@ -1,78 +1,67 @@
-using System.Text;
 using Reader.Core;
+using Reader.Models;
 
 namespace Reader.Tests;
 
 /// <summary>
-/// Tests MarkerParser.ParseFromBuffer with buffers that simulate raw memory regions —
-/// no live process required.
+/// Buffer-level tests for the v3 parser via MarkerParser. The full
+/// MemoryScanner requires a live process and is exercised by the
+/// in-game smoke test.
 /// </summary>
 public class MemoryScannerTests
 {
-    private static byte[] BuildBuffer(string prefix, string marker, string suffix)
+    private static byte[] BuildV3()
     {
-        byte[] p = new byte[prefix.Length];   // zero-filled junk
-        byte[] m = Encoding.UTF8.GetBytes(marker);
-        byte[] s = new byte[suffix.Length];
-        return [.. p, .. m, .. s];
-        }
-
-    private const string ValidMarker =
-        "##READER_DATA##|Player|65|Cleric|Guild|9000|10000|mana|5000|7000|100.00|200.00|0.00||||##END_READER##";
-
-    [Fact]
-    public void ParseFromBuffer_MarkerAtStart_Parses()
-    {
-        byte[] buf = Encoding.UTF8.GetBytes(ValidMarker);
-        var snap = MarkerParser.ParseFromBuffer(buf);
-        Assert.NotNull(snap);
-        Assert.Equal("Player", snap.Player.Name);
+        var enc = new V3Encoder();
+        return enc.Build(
+            seq: 1,
+            frameTimeMs: 0,
+            flags: ReaderFlags.None,
+            'A',
+            new ReaderSnapshot(
+                ReaderPayloadVersion.V3,
+                new PlayerIdentity("Player", 65, "Cleric", "Guild"),
+                new PlayerStats(9000, 10000, 90, "mana", 5000, 7000, 71),
+                new PlayerPosition(100, 200, 0),
+                Target: null,
+                DateTimeOffset.UtcNow));
     }
 
     [Fact]
-    public void ParseFromBuffer_MarkerAfterJunk_Parses()
+    public void ParseFromBuffer_V3AtBufferStart_Parses()
     {
-        byte[] buf = BuildBuffer(new string('\0', 512), ValidMarker, new string('\0', 256));
-        var snap = MarkerParser.ParseFromBuffer(buf);
+        var snap = MarkerParser.ParseFromBuffer(BuildV3());
         Assert.NotNull(snap);
         Assert.Equal("Player", snap.Player.Name);
-        Assert.Equal(65, snap.Player.Level);
+        Assert.Equal(ReaderPayloadVersion.V3, snap.PayloadVersion);
     }
 
     [Fact]
-    public void ParseFromBuffer_MarkerNearEnd_Parses()
+    public void ParseFromBuffer_V3WithLeadingPadding_RequiresExactStart()
     {
-        byte[] buf = BuildBuffer(new string('\0', 2048), ValidMarker, "");
-        var snap = MarkerParser.ParseFromBuffer(buf);
+        // The parser expects the magic at offset 0 of the slice it's given.
+        // The MemoryScanner is responsible for finding the magic in a region
+        // and slicing accordingly.
+        byte[] withPad = new byte[V3Layout.TotalLen + 64];
+        BuildV3().CopyTo(withPad, 64);
+        Assert.Null(MarkerParser.ParseFromBuffer(withPad));
+
+        // Slice at the right offset → succeeds
+        var snap = MarkerParser.ParseFromBuffer(withPad.AsSpan(64, V3Layout.TotalLen));
         Assert.NotNull(snap);
-        Assert.Equal("mana", snap.Stats.ResourceKind);
     }
 
     [Fact]
     public void ParseFromBuffer_NoMarkerInBuffer_ReturnsNull()
     {
-        byte[] buf = new byte[1024]; // all zeros
-        Assert.Null(MarkerParser.ParseFromBuffer(buf));
+        Assert.Null(MarkerParser.ParseFromBuffer(new byte[V3Layout.TotalLen]));
     }
 
     [Fact]
-    public void ParseFromBuffer_PartialMarkerTruncated_ReturnsNull()
+    public void ParseFromBuffer_V3WithoutTarget_HasNullTarget()
     {
-        // Start marker present but no end marker
-        byte[] buf = Encoding.UTF8.GetBytes("##READER_DATA##|Player|65|Cleric|Guild|9000|10000");
-        Assert.Null(MarkerParser.ParseFromBuffer(buf));
-    }
-
-    [Fact]
-    public void ParseFromBuffer_MultipleMarkersInBuffer_ParsesFirst()
-    {
-        // Simulate two marker strings in the same buffer (e.g. Lua GC kept old copy)
-        string old = "##READER_DATA##|OldPlayer|60|Warrior||1000|5000|energy|80|100|0.00|0.00|0.00||||##END_READER##";
-        string current = ValidMarker;
-        byte[] buf = [.. Encoding.UTF8.GetBytes(old), .. new byte[64], .. Encoding.UTF8.GetBytes(current)];
-        var snap = MarkerParser.ParseFromBuffer(buf);
+        var snap = MarkerParser.ParseFromBuffer(BuildV3());
         Assert.NotNull(snap);
-        // Should parse the first (old) marker
-        Assert.Equal("OldPlayer", snap.Player.Name);
+        Assert.Null(snap.Target);
     }
 }

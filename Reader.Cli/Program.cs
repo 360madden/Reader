@@ -1,11 +1,11 @@
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Reader.Core;
 using Reader.Models;
 
 bool jsonMode = args.Contains("--json");
-string[] filteredArgs = args.Where(a => a != "--json").ToArray();
+bool showStats = args.Contains("--stats");
+string[] filteredArgs = args.Where(a => a != "--json" && a != "--stats").ToArray();
 string command = filteredArgs.Length > 0 ? filteredArgs[0].ToLowerInvariant() : "help";
 
 var jsonOptions = new JsonSerializerOptions
@@ -53,11 +53,12 @@ void RunOnce()
 
     if (snap is null)
     {
-        Console.WriteLine("ReaderBridge marker not found. Is the addon installed and RIFT UI loaded?");
+        Console.WriteLine("ReaderBridge v3 marker not found. Is the addon installed and RIFT UI loaded?");
         return;
     }
 
     Output(snap);
+    if (showStats) PrintStats(scanner.Stats);
 }
 
 void RunWatch(int intervalMs)
@@ -79,9 +80,11 @@ void RunWatch(int intervalMs)
         if (!jsonMode) Console.Clear();
         var snap = scanner.Read();
         if (snap is null)
-            Console.WriteLine(jsonMode ? "{}" : "Waiting for ReaderBridge marker...");
+            Console.WriteLine(jsonMode ? "{}" : "Waiting for ReaderBridge v3 marker...");
         else
             Output(snap);
+
+        if (showStats && !jsonMode) PrintStats(scanner.Stats);
 
         Thread.Sleep(intervalMs);
     }
@@ -89,22 +92,33 @@ void RunWatch(int intervalMs)
 
 void RunSmoke()
 {
-    if (!jsonMode) Console.WriteLine("Running smoke test with synthetic marker...");
+    if (!jsonMode) Console.WriteLine("Running smoke test with synthetic v3 buffer...");
 
-    const string marker =
-        "##READER_DATA##|Arthok|70|Mage|SomeGuild|12500|15000|mana|8900|10000|1234.56|789.01|-45.23|Dragnoth|72|55|hostile|##END_READER##";
+    var encoder = new V3Encoder();
+    var snapshot = new ReaderSnapshot(
+        ReaderPayloadVersion.V3,
+        new PlayerIdentity("Arthok", 70, "Mage", "SomeGuild"),
+        new PlayerStats(12500, 15000, 83, "mana", 8900, 10000, 89),
+        new PlayerPosition(1234.56f, 789.01f, -45.23f),
+        new TargetInfo("Dragnoth", 72, 55, "hostile"),
+        DateTimeOffset.UtcNow,
+        Seq: 42,
+        FrameTimeMs: 123_456,
+        Flags: ReaderFlags.HasTarget | ReaderFlags.InCombat,
+        Combat: new CombatStats(2150.5, 1980.2, 0, 0, 350.1, 280.4),
+        Zone: new ZoneInfo(38, "Mathosia"));
 
-    byte[] buf = Encoding.UTF8.GetBytes(marker);
-    var snap = MarkerParser.ParseFromBuffer(buf);
+    byte[] buf = encoder.Build(seq: 42, frameTimeMs: 123_456, flags: ReaderFlags.HasTarget | ReaderFlags.InCombat, activeSlot: 'A', snapshot);
 
-    if (snap is null)
+    var parsed = MarkerParser.ParseFromBuffer(buf);
+    if (parsed is null)
     {
         Console.WriteLine("FAIL: parser returned null.");
         return;
     }
 
     if (!jsonMode) Console.WriteLine("PASS");
-    Output(snap);
+    Output(parsed);
 }
 
 void InstallAddon()
@@ -112,7 +126,6 @@ void InstallAddon()
     string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     string dest = Path.Combine(docs, "RIFT", "Interface", "Addons", "ReaderBridge");
 
-    // Source is relative to the executable: ../../../../LuaBridge/ReaderBridge
     string exe = AppContext.BaseDirectory;
     string src = Path.GetFullPath(Path.Combine(exe, "..", "..", "..", "..", "LuaBridge", "ReaderBridge"));
 
@@ -149,62 +162,96 @@ void PrintJson(ReaderSnapshot s)
     var obj = new
     {
         timestamp = s.Timestamp.ToString("o"),
+        payloadVersion = (int)s.PayloadVersion,
+        seq = s.Seq,
+        frameTimeMs = s.FrameTimeMs,
+        flags = s.Flags.ToString(),
         player = new
         {
-            name     = s.Player.Name,
-            level    = s.Player.Level,
-            calling  = s.Player.Calling,
-            guild    = s.Player.Guild,
+            name = s.Player.Name,
+            level = s.Player.Level,
+            calling = s.Player.Calling,
+            guild = s.Player.Guild,
         },
-        hp = new
-        {
-            current = s.Stats.Hp,
-            max     = s.Stats.HpMax,
-        },
+        hp = new { current = s.Stats.Hp, max = s.Stats.HpMax, pct = s.Stats.HpPercent },
         resource = new
         {
-            kind    = s.Stats.ResourceKind,
+            kind = s.Stats.ResourceKind,
             current = s.Stats.Resource,
-            max     = s.Stats.ResourceMax,
+            max = s.Stats.ResourceMax,
+            pct = s.Stats.ResourcePercent,
         },
-        position = new
-        {
-            x = s.Position.X,
-            y = s.Position.Y,
-            z = s.Position.Z,
-        },
+        position = new { x = s.Position.X, y = s.Position.Y, z = s.Position.Z },
         target = s.Target is null ? null : new
         {
-            name     = s.Target.Name,
-            level    = s.Target.Level,
-            hpPct    = s.Target.HpPercent,
+            name = s.Target.Name,
+            level = s.Target.Level,
+            hpPct = s.Target.HpPercent,
             relation = s.Target.Relation,
         },
+        zone = s.Zone,
+        combat = s.Combat,
+        playerBuffs = s.PlayerBuffs,
+        playerDebuffs = s.PlayerDebuffs,
+        targetBuffs = s.TargetBuffs,
+        targetDebuffs = s.TargetDebuffs,
+        combatEvents = s.CombatEvents,
     };
     Console.WriteLine(JsonSerializer.Serialize(obj, jsonOptions));
 }
 
 void PrintSnapshot(ReaderSnapshot s)
 {
-    Console.WriteLine($"[{s.Timestamp:HH:mm:ss.fff}]");
+    Console.WriteLine($"[{s.Timestamp:HH:mm:ss.fff}] [v{(int)s.PayloadVersion}] seq={s.Seq} t={s.FrameTimeMs}ms flags={s.Flags}");
     Console.WriteLine($"  Player   : {s.Player.Name} (Lvl {s.Player.Level}) {s.Player.Calling} | Guild: {s.Player.Guild ?? "-"}");
-    Console.WriteLine($"  HP       : {s.Stats.Hp} / {s.Stats.HpMax}");
-    Console.WriteLine($"  Resource : {s.Stats.ResourceKind} {s.Stats.Resource} / {s.Stats.ResourceMax}");
-    Console.WriteLine($"  Position : X={s.Position.X:F2} Y={s.Position.Y:F2} Z={s.Position.Z:F2}");
+    Console.WriteLine($"  HP       : {FormatStat(s.Stats.Hp, s.Stats.HpMax, s.Stats.HpPercent)}");
+    Console.WriteLine($"  Resource : {s.Stats.ResourceKind ?? "-"} {FormatStat(s.Stats.Resource, s.Stats.ResourceMax, s.Stats.ResourcePercent)}");
+    Console.WriteLine($"  Position : X={FormatFloat(s.Position.X)} Y={FormatFloat(s.Position.Y)} Z={FormatFloat(s.Position.Z)}");
+
+    if (s.Zone is not null)
+        Console.WriteLine($"  Zone     : {s.Zone.Name} (id {s.Zone.Id})");
 
     if (s.Target is not null)
-        Console.WriteLine($"  Target   : {s.Target.Name} (Lvl {s.Target.Level}) HP={s.Target.HpPercent}% [{s.Target.Relation}]");
+        Console.WriteLine($"  Target   : {s.Target.Name} (Lvl {s.Target.Level}) HP={FormatPercent(s.Target.HpPercent)} [{s.Target.Relation}]");
     else
-        Console.WriteLine($"  Target   : (none)");
+        Console.WriteLine("  Target   : (none)");
+
+    if (s.Combat is not null)
+        Console.WriteLine($"  Combat   : DPS {s.Combat.Dps1s:F0}/{s.Combat.Dps5s:F0}  HPS {s.Combat.Hps1s:F0}/{s.Combat.Hps5s:F0}  IN {s.Combat.Incoming1s:F0}/{s.Combat.Incoming5s:F0}");
+
+    if (s.PlayerBuffs is { Count: > 0 } pb)   Console.WriteLine($"  Buffs    : {pb.Count}");
+    if (s.PlayerDebuffs is { Count: > 0 } pd) Console.WriteLine($"  Debuffs  : {pd.Count}");
+    if (s.CombatEvents is { Count: > 0 } ce)  Console.WriteLine($"  Events   : {ce.Count} since last tick");
+
+    Console.WriteLine();
 }
+
+void PrintStats(ScannerStats stats)
+{
+    Console.WriteLine($"  Scanner  : stable={stats.StableHits} window={stats.SmallWindowHits} full={stats.FullScanHits} crcFail={stats.CrcFailures}");
+}
+
+string FormatStat(int? current, int? max, int? percent)
+{
+    if (current is not null && max is not null && percent is not null)
+        return $"{current} / {max} ({percent}%)";
+    if (current is not null && max is not null)
+        return $"{current} / {max}";
+    if (percent is not null)
+        return $"{percent}%";
+    return "-";
+}
+
+string FormatPercent(int? percent) => percent is null ? "-" : $"{percent}%";
+string FormatFloat(float? value)   => value is null ? "-" : value.Value.ToString("F2");
 
 void PrintHelp()
 {
-    Console.WriteLine("Reader - RIFT Memory Reader");
+    Console.WriteLine("Reader - RIFT Memory Reader (v3 protocol)");
     Console.WriteLine();
     Console.WriteLine("Usage:");
-    Console.WriteLine("  Reader.Cli once [--json]              Single read and print");
-    Console.WriteLine("  Reader.Cli watch [intervalMs] [--json] Continuous watch (default 500ms)");
-    Console.WriteLine("  Reader.Cli smoke [--json]             Parse synthetic test data (no RIFT needed)");
-    Console.WriteLine("  Reader.Cli install-addon              Copy ReaderBridge addon to RIFT addons folder");
+    Console.WriteLine("  Reader.Cli once [--json] [--stats]               Single read and print");
+    Console.WriteLine("  Reader.Cli watch [intervalMs] [--json] [--stats] Continuous watch (default 500ms)");
+    Console.WriteLine("  Reader.Cli smoke [--json]                        Encode + parse a synthetic v3 buffer");
+    Console.WriteLine("  Reader.Cli install-addon                         Copy ReaderBridge addon to RIFT addons folder");
 }
