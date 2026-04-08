@@ -25,8 +25,8 @@ namespace Reader.Core;
 /// </summary>
 public sealed class MemoryScanner
 {
-    private const int RescanWindow = 2 * 1024 * 1024;     // ±2 MB
-    private const int FullScanRegionMax = 4 * 1024 * 1024; // 4 MB chunks
+    private const int RescanWindow   = 2 * 1024 * 1024;  // ±2 MB
+    private const int ScanChunkSize  = 4 * 1024 * 1024;  // read 4 MB at a time (no per-region cap)
 
     private readonly nint _handle;
 
@@ -108,12 +108,21 @@ public sealed class MemoryScanner
 
             if (IsReadable(mbi))
             {
-                int regionSize = (int)Math.Min(mbi.RegionSize, (nuint)FullScanRegionMax);
-                byte[]? buf = ReadAt(mbi.BaseAddress, regionSize);
-                if (buf is not null)
+                // Scan the entire region in ScanChunkSize chunks so we never miss
+                // strings that fall beyond the first chunk in a large Lua heap region.
+                nuint chunkBase = mbi.BaseAddress;
+                nuint regionRemain = mbi.RegionSize;
+                while (regionRemain > 0)
                 {
-                    var snap = SearchAndParse(buf, mbi.BaseAddress);
-                    if (snap is not null) return snap;
+                    int chunkLen = (int)Math.Min(regionRemain, (nuint)ScanChunkSize);
+                    byte[]? buf = ReadAt(chunkBase, chunkLen);
+                    if (buf is not null)
+                    {
+                        var snap = SearchAndParse(buf, chunkBase);
+                        if (snap is not null) return snap;
+                    }
+                    chunkBase    += (nuint)chunkLen;
+                    regionRemain -= (nuint)chunkLen;
                 }
             }
 
