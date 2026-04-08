@@ -1,0 +1,6 @@
+Identifier = "PlayerCoords"
+Name = "Player Coords"
+Email = "x"
+RunOnStartup = {
+	"PlayerCoords.lua"
+	}
