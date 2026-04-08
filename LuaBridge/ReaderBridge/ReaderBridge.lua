@@ -1,13 +1,17 @@
 --[[
 ================================================================================
-ReaderBridge v3 — high-performance Lua-side emitter for the RIFT Reader project.
+ReaderBridge v4 — high-performance Lua-side emitter for the RIFT Reader project.
 
 Mirrors the byte layout defined in Reader.Core/V3Layout.cs exactly. The C#
-scanner reads the global `ReaderBridge_v3` directly out of the RIFT process's
+scanner reads the global `ReaderBridge_v4` directly out of the RIFT process's
 Lua string heap via ReadProcessMemory.
 
-Layout (always exactly 8392 bytes):
-    [ MAGIC 8 ][ CONTROL 32 ][ SLOT_A 4176 ][ SLOT_B 4176 ]
+v4 doubles SLOT_BODY_MAX from 4096 to 8192 to reserve headroom for phase-2
+sections (cooldowns, equipment, character stats, group, currency). All offsets,
+integrity guards, and double-buffering are unchanged from v3.
+
+Layout (always exactly 16584 bytes):
+    [ MAGIC 8 ][ CONTROL 32 ][ SLOT_A 8272 ][ SLOT_B 8272 ]
 
 Design rules:
   * Event handlers only mark dirty flags; they NEVER publish.
@@ -24,10 +28,10 @@ is offset-indexed; any drift will break the integrity guards.
 ]]
 
 ReaderBridge = ReaderBridge or {}
-ReaderBridge_v3 = ReaderBridge_v3 or ""
+ReaderBridge_v4 = ReaderBridge_v4 or ""
 ReaderBridge_State = ReaderBridge_State or {}
 
-local VERSION    = "0.3.0"
+local VERSION    = "0.4.0"
 local TICK_MS    = 50           -- publish cadence in milliseconds (20 Hz)
 local COMBAT_RING_SIZE = 64     -- cap on combat events drained per tick
 
@@ -116,16 +120,16 @@ local function hex16(n)
 end
 
 -- ---------- protocol constants (must match V3Layout.cs) ----------
-local MAGIC         = "RBRG3\n=="   -- 8 bytes
+local MAGIC         = "RBRG4\n=="   -- 8 bytes
 local SLOT_END      = "==RBRG=="    -- 8 bytes
 local MAGIC_LEN     = 8
 local CONTROL_LEN   = 32
 local SLOT_HDR_LEN  = 64
-local SLOT_BODY_MAX = 4096
+local SLOT_BODY_MAX = 8192
 local CRC_LEN       = 8
 local SLOT_END_LEN  = 8
-local SLOT_LEN      = SLOT_HDR_LEN + SLOT_BODY_MAX + CRC_LEN + SLOT_END_LEN -- 4176
-local TOTAL_LEN     = MAGIC_LEN + CONTROL_LEN + 2 * SLOT_LEN                -- 8392
+local SLOT_LEN      = SLOT_HDR_LEN + SLOT_BODY_MAX + CRC_LEN + SLOT_END_LEN -- 8272
+local TOTAL_LEN     = MAGIC_LEN + CONTROL_LEN + 2 * SLOT_LEN                -- 16584
 
 -- Padded empty body used by the inactive slot on first publish.
 local EMPTY_BODY_PAD = rep(".", SLOT_BODY_MAX)
@@ -530,7 +534,7 @@ local function buildSlotHeader(seq, tMs, flags, bodyLen, secMask)
         .. hex8(flags)    .. "|"   -- 8 + 1
         .. hex8(bodyLen)  .. "|"   -- 8 + 1
         .. hex8(secMask)  .. "|"   -- 8 + 1
-        .. "03|\n"                  -- 2 + 1 + 1
+        .. "04|\n"                  -- 2 + 1 + 1
     -- 3 + 17 + 13 + 9 + 9 + 9 + 4 = 64
 end
 
@@ -678,7 +682,7 @@ local function publish()
         error(format("ReaderBridge: total length %d != %d", #full, TOTAL_LEN))
     end
 
-    ReaderBridge_v3   = full
+    ReaderBridge_v4   = full
     ReaderBridge_State = state
 
     publishDurMs = frameTimeMs() - tStart
@@ -904,7 +908,7 @@ local function slashDump()
         "target=" .. (state.target.exists and state.target.name or "(none)"),
         "buffs=" .. #state.playerBuffs.list .. " debuffs=" .. #state.playerDebuffs.list,
         "combat.events=" .. state.combatRing.count,
-        "payload.len=" .. #ReaderBridge_v3,
+        "payload.len=" .. #ReaderBridge_v4,
     }
     for _, line in ipairs(lines) do
         Command.Console.Display("general", false, line, false)

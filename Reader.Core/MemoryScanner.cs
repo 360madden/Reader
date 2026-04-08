@@ -5,10 +5,10 @@ using Reader.Models;
 namespace Reader.Core;
 
 /// <summary>
-/// Scans the RIFT process memory for the v3 ReaderBridge payload.
+/// Scans the RIFT process memory for the v4 ReaderBridge payload.
 ///
-/// The v3 payload is always exactly <see cref="V3Layout.TotalLen"/> bytes
-/// (8392), starts with the 8-byte <see cref="V3Layout.Magic"/>, and ends with
+/// The v4 payload is always exactly <see cref="V3Layout.TotalLen"/> bytes
+/// (16584), starts with the 8-byte <see cref="V3Layout.Magic"/>, and ends with
 /// the <see cref="V3Layout.SlotEnd"/> sentinel inside the active slot. Because
 /// the byte length is fixed, the Lua string allocator frequently reuses the
 /// same heap slot across publishes, so the cached address hits on most reads

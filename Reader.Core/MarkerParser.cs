@@ -7,7 +7,7 @@ namespace Reader.Core;
 ///
 /// The format is fixed-offset (see <see cref="V3Layout"/>):
 ///
-///   [ MAGIC 8 ][ CONTROL 32 ][ SLOT_A 4176 ][ SLOT_B 4176 ]   = 8392 bytes
+///   [ MAGIC 8 ][ CONTROL 32 ][ SLOT_A 8272 ][ SLOT_B 8272 ]   = 16584 bytes
 ///
 /// Parsing strategy:
 ///   1. Verify magic.
@@ -62,11 +62,10 @@ public static class MarkerParser
         var body = slot.Slice(V3Layout.BodyOff, (int)bodyLen);
 
         // CRC verify (guard #2): CRC over (slotHdr + body[0..len])
+        // Header and body are already contiguous in the slot, so we can CRC
+        // the slice directly — no copy needed.
         if (!V3Layout.TryParseHexU32(slot.Slice(V3Layout.CrcOff, V3Layout.CrcLen), out uint storedCrc)) return null;
-        Span<byte> crcInput = stackalloc byte[V3Layout.SlotHdrLen + V3Layout.SlotBodyMax];
-        slot[..V3Layout.SlotHdrLen].CopyTo(crcInput);
-        body.CopyTo(crcInput[V3Layout.SlotHdrLen..]);
-        uint computed = Crc32.Compute(crcInput[..(V3Layout.SlotHdrLen + body.Length)]);
+        uint computed = Crc32.Compute(slot[..(V3Layout.SlotHdrLen + body.Length)]);
         if (computed != storedCrc) return null;
 
         // Sentinel (guard #3)
@@ -76,7 +75,7 @@ public static class MarkerParser
         var sectioned = WalkSections(body, secMask);
 
         return new ReaderSnapshot(
-            ReaderPayloadVersion.V3,
+            ReaderPayloadVersion.V4,
             sectioned.Player ?? new PlayerIdentity(null, null, null, null),
             sectioned.Stats  ?? new PlayerStats(null, null, null, null, null, null, null),
             sectioned.Position ?? new PlayerPosition(null, null, null),

@@ -1,12 +1,17 @@
 namespace Reader.Core;
 
 /// <summary>
-/// Byte-level layout constants for the v3 ReaderBridge wire format.
+/// Byte-level layout constants for the v4 ReaderBridge wire format.
 ///
-/// Top-level (8392 bytes total, fixed length):
-///   [ MAGIC 8 ][ CONTROL 32 ][ SLOT_A 4176 ][ SLOT_B 4176 ]
+/// v4 doubles the BODY budget from 4096 to 8192 bytes to make room for
+/// phase-2 sections (cooldowns, equipment, character stats, group, currency)
+/// without compromising the existing buffs/combat headroom. Layout, offsets,
+/// integrity guards, and double-buffering are otherwise unchanged from v3.
 ///
-/// MAGIC (8B):    "RBRG3\n=="
+/// Top-level (16584 bytes total, fixed length):
+///   [ MAGIC 8 ][ CONTROL 32 ][ SLOT_A 8272 ][ SLOT_B 8272 ]
+///
+/// MAGIC (8B):    "RBRG4\n=="
 ///
 /// CONTROL (32B): byte offsets within the control block
 ///   0      : 'A' or 'B'   (active slot)
@@ -16,7 +21,7 @@ namespace Reader.Core;
 ///   19..30 : t_ms         (12 hex chars, u48 monotonic ms)
 ///   31     : '\n'
 ///
-/// SLOT (4176B):  [ SLOT_HDR 64 ][ BODY 4096 padded ][ CRC 8 ][ SLOT_END 8 ]
+/// SLOT (8272B):  [ SLOT_HDR 64 ][ BODY 8192 padded ][ CRC 8 ][ SLOT_END 8 ]
 ///
 /// SLOT_HDR (64B): byte offsets within the slot header
 ///   0..1   : "SH"
@@ -31,7 +36,7 @@ namespace Reader.Core;
 ///   50     : '|'
 ///   51..58 : sec          (8 hex, section presence bitmask)
 ///   59     : '|'
-///   60..61 : ver          ("03")
+///   60..61 : ver          ("04")
 ///   62     : '|'
 ///   63     : '\n'
 ///
@@ -46,22 +51,22 @@ namespace Reader.Core;
 /// </summary>
 public static class V3Layout
 {
-    public static ReadOnlySpan<byte> Magic    => "RBRG3\n=="u8;
+    public static ReadOnlySpan<byte> Magic    => "RBRG4\n=="u8;
     public static ReadOnlySpan<byte> SlotEnd  => "==RBRG=="u8;
 
     public const int MagicLen      = 8;
     public const int ControlLen    = 32;
     public const int SlotHdrLen    = 64;
-    public const int SlotBodyMax   = 4096;
+    public const int SlotBodyMax   = 8192;
     public const int CrcLen        = 8;
     public const int SlotEndLen    = 8;
-    public const int SlotLen       = SlotHdrLen + SlotBodyMax + CrcLen + SlotEndLen; // 4176
-    public const int TotalLen      = MagicLen + ControlLen + 2 * SlotLen;            // 8392
+    public const int SlotLen       = SlotHdrLen + SlotBodyMax + CrcLen + SlotEndLen; // 8272
+    public const int TotalLen      = MagicLen + ControlLen + 2 * SlotLen;            // 16584
 
     // Top-level offsets
     public const int ControlOff    = MagicLen;                       // 8
     public const int SlotAOff      = MagicLen + ControlLen;          // 40
-    public const int SlotBOff      = SlotAOff + SlotLen;             // 4216
+    public const int SlotBOff      = SlotAOff + SlotLen;             // 8312
 
     // Control field offsets (relative to start of control block)
     public const int CtrlActiveOff = 0;
@@ -78,8 +83,8 @@ public static class V3Layout
 
     // Slot internal offsets
     public const int BodyOff       = SlotHdrLen;                     // 64
-    public const int CrcOff        = SlotHdrLen + SlotBodyMax;       // 4160
-    public const int SlotEndOff    = CrcOff + CrcLen;                // 4168
+    public const int CrcOff        = SlotHdrLen + SlotBodyMax;       // 8256
+    public const int SlotEndOff    = CrcOff + CrcLen;                // 8264
 
     // Section presence bits (matches Lua emitter)
     public const uint SecP = 1u << 0;  // Player
@@ -92,7 +97,7 @@ public static class V3Layout
     public const uint SecS = 1u << 7;  // Stats
     public const uint SecZ = 1u << 8;  // Zone
 
-    public const byte VerByte = (byte)'3';
+    public const byte VerByte = (byte)'4';
 
     // ---------- Hex parse helpers (zero allocation) ----------
 

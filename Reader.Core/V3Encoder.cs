@@ -15,7 +15,7 @@ public sealed class V3Encoder
     private readonly StringBuilder _bodyBuilder = new(capacity: V3Layout.SlotBodyMax);
 
     /// <summary>
-    /// Build a complete 8392-byte v3 buffer with a single populated slot.
+    /// Build a complete 16584-byte v4 buffer with a single populated slot.
     /// The other slot is filled with zeros (and a stale-seq header so the
     /// scanner ignores it).
     /// </summary>
@@ -94,11 +94,9 @@ public sealed class V3Encoder
         bodyDest[body.Length..].Fill((byte)'.');
 
         // -- CRC over (SLOT_HDR + body[0..len]) --
-        // Compute over the actual payload, not the padding.
-        Span<byte> crcInput = stackalloc byte[V3Layout.SlotHdrLen + V3Layout.SlotBodyMax];
-        slot[..V3Layout.SlotHdrLen].CopyTo(crcInput);
-        body.CopyTo(crcInput[V3Layout.SlotHdrLen..]);
-        uint crc = Crc32.Compute(crcInput[..(V3Layout.SlotHdrLen + body.Length)]);
+        // Header is already at slot[0..64] and body is already at slot[64..64+len],
+        // so we can CRC the contiguous slice directly — no copy needed.
+        uint crc = Crc32.Compute(slot[..(V3Layout.SlotHdrLen + body.Length)]);
         V3Layout.WriteHex(slot.Slice(V3Layout.CrcOff, V3Layout.CrcLen), crc, 8);
 
         // -- SLOT_END --

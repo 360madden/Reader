@@ -6,7 +6,7 @@ namespace Reader.Tests;
 public class MarkerParserTests
 {
     private static ReaderSnapshot SampleSnapshot() => new(
-        ReaderPayloadVersion.V3,
+        ReaderPayloadVersion.V4,
         new PlayerIdentity("Arthok", 70, "Mage", "Pipes|And;Equals=InGuild"),
         new PlayerStats(12500, 15000, 83, "mana", 8900, 10000, 89),
         new PlayerPosition(1234.56f, 789.01f, -45.23f),
@@ -25,12 +25,12 @@ public class MarkerParserTests
     }
 
     [Fact]
-    public void ParseFromBuffer_ValidV3_RoundTripsAllSections()
+    public void ParseFromBuffer_ValidV4_RoundTripsAllSections()
     {
         var snap = MarkerParser.ParseFromBuffer(BuildValid());
 
         Assert.NotNull(snap);
-        Assert.Equal(ReaderPayloadVersion.V3, snap.PayloadVersion);
+        Assert.Equal(ReaderPayloadVersion.V4, snap.PayloadVersion);
         Assert.Equal(0xDEADBEEFCAFEul, snap.Seq);
         Assert.Equal(0x123456L, snap.FrameTimeMs);
         Assert.Equal(ReaderFlags.HasTarget | ReaderFlags.InCombat, snap.Flags);

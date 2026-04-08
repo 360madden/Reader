@@ -4,7 +4,7 @@ using Reader.Models;
 namespace Reader.Tests;
 
 /// <summary>
-/// Buffer-level tests for the v3 parser via MarkerParser. The full
+/// Buffer-level tests for the v4 parser via MarkerParser. The full
 /// MemoryScanner requires a live process and is exercised by the
 /// in-game smoke test.
 /// </summary>
@@ -19,7 +19,7 @@ public class MemoryScannerTests
             flags: ReaderFlags.None,
             'A',
             new ReaderSnapshot(
-                ReaderPayloadVersion.V3,
+                ReaderPayloadVersion.V4,
                 new PlayerIdentity("Player", 65, "Cleric", "Guild"),
                 new PlayerStats(9000, 10000, 90, "mana", 5000, 7000, 71),
                 new PlayerPosition(100, 200, 0),
@@ -33,7 +33,7 @@ public class MemoryScannerTests
         var snap = MarkerParser.ParseFromBuffer(BuildV3());
         Assert.NotNull(snap);
         Assert.Equal("Player", snap.Player.Name);
-        Assert.Equal(ReaderPayloadVersion.V3, snap.PayloadVersion);
+        Assert.Equal(ReaderPayloadVersion.V4, snap.PayloadVersion);
     }
 
     [Fact]

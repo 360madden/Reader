@@ -53,7 +53,7 @@ void RunOnce()
 
     if (snap is null)
     {
-        Console.WriteLine("ReaderBridge v3 marker not found. Is the addon installed and RIFT UI loaded?");
+        Console.WriteLine("ReaderBridge v4 marker not found. Is the addon installed and RIFT UI loaded?");
         return;
     }
 
@@ -80,7 +80,7 @@ void RunWatch(int intervalMs)
         if (!jsonMode) Console.Clear();
         var snap = scanner.Read();
         if (snap is null)
-            Console.WriteLine(jsonMode ? "{}" : "Waiting for ReaderBridge v3 marker...");
+            Console.WriteLine(jsonMode ? "{}" : "Waiting for ReaderBridge v4 marker...");
         else
             Output(snap);
 
@@ -92,11 +92,11 @@ void RunWatch(int intervalMs)
 
 void RunSmoke()
 {
-    if (!jsonMode) Console.WriteLine("Running smoke test with synthetic v3 buffer...");
+    if (!jsonMode) Console.WriteLine("Running smoke test with synthetic v4 buffer...");
 
     var encoder = new V3Encoder();
     var snapshot = new ReaderSnapshot(
-        ReaderPayloadVersion.V3,
+        ReaderPayloadVersion.V4,
         new PlayerIdentity("Arthok", 70, "Mage", "SomeGuild"),
         new PlayerStats(12500, 15000, 83, "mana", 8900, 10000, 89),
         new PlayerPosition(1234.56f, 789.01f, -45.23f),
@@ -247,11 +247,11 @@ string FormatFloat(float? value)   => value is null ? "-" : value.Value.ToString
 
 void PrintHelp()
 {
-    Console.WriteLine("Reader - RIFT Memory Reader (v3 protocol)");
+    Console.WriteLine("Reader - RIFT Memory Reader (v4 protocol)");
     Console.WriteLine();
     Console.WriteLine("Usage:");
     Console.WriteLine("  Reader.Cli once [--json] [--stats]               Single read and print");
     Console.WriteLine("  Reader.Cli watch [intervalMs] [--json] [--stats] Continuous watch (default 500ms)");
-    Console.WriteLine("  Reader.Cli smoke [--json]                        Encode + parse a synthetic v3 buffer");
+    Console.WriteLine("  Reader.Cli smoke [--json]                        Encode + parse a synthetic v4 buffer");
     Console.WriteLine("  Reader.Cli install-addon                         Copy ReaderBridge addon to RIFT addons folder");
 }
