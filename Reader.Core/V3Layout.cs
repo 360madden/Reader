@@ -94,8 +94,14 @@ public static class V3Layout
     public const uint Secb = 1u << 4;  // Target buffs
     public const uint Secd = 1u << 5;  // Target debuffs
     public const uint SecC = 1u << 6;  // Combat events
-    public const uint SecS = 1u << 7;  // Stats
+    public const uint SecS = 1u << 7;  // Stats (combat rates)
     public const uint SecZ = 1u << 8;  // Zone
+    // v4 phase-2 sections
+    public const uint SecK = 1u << 9;  // Cooldowns
+    public const uint SecX = 1u << 10; // Character attributes (STR/DEX/etc, resists, ratings)
+    public const uint SecE = 1u << 11; // Equipment
+    public const uint SecY = 1u << 12; // Currency
+    public const uint SecG = 1u << 13; // Group/raid members
 
     public const byte VerByte = (byte)'4';
 

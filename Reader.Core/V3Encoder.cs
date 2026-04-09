@@ -179,7 +179,144 @@ public sealed class V3Encoder
             AppendCombatSection(sb, ce);
         }
 
+        // K — Cooldowns (v4)
+        if (snap.Cooldowns is { Count: > 0 } cds)
+        {
+            sec |= V3Layout.SecK;
+            AppendCooldownSection(sb, cds);
+        }
+
+        // X — Character attributes (v4)
+        if (snap.Attributes is not null)
+        {
+            sec |= V3Layout.SecX;
+            AppendAttributesSection(sb, snap.Attributes);
+        }
+
+        // E — Equipment (v4)
+        if (snap.Equipment is { Count: > 0 } eq)
+        {
+            sec |= V3Layout.SecE;
+            AppendEquipmentSection(sb, eq);
+        }
+
+        // Y — Currency (v4)
+        if (snap.Currencies is { Count: > 0 } cur)
+        {
+            sec |= V3Layout.SecY;
+            AppendCurrencySection(sb, cur);
+        }
+
+        // G — Group/raid (v4)
+        if (snap.Group is { Count: > 0 } grp)
+        {
+            sec |= V3Layout.SecG;
+            AppendGroupSection(sb, grp);
+        }
+
         return sec;
+    }
+
+    private static void AppendCooldownSection(StringBuilder sb, IReadOnlyList<CooldownInfo> cds)
+    {
+        AppendSection(sb, 'K', body =>
+        {
+            AppendInt(body, "n", cds.Count);
+            for (int i = 0; i < cds.Count; i++)
+            {
+                var c = cds[i];
+                AppendLong(body, "id", c.AbilityId);
+                AppendStr(body, "nm", c.Name);
+                AppendInt(body, "rem", c.RemainMs);
+                AppendInt(body, "dur", c.DurationMs);
+                AppendInt(body, "cost", c.ResourceCost);
+                AppendStr(body, "rk", c.ResourceKind ?? "");
+            }
+        });
+    }
+
+    private static void AppendAttributesSection(StringBuilder sb, CharacterStats a)
+    {
+        AppendSection(sb, 'X', body =>
+        {
+            AppendInt(body, "str", a.Strength ?? 0);
+            AppendInt(body, "dex", a.Dexterity ?? 0);
+            AppendInt(body, "int", a.Intelligence ?? 0);
+            AppendInt(body, "wis", a.Wisdom ?? 0);
+            AppendInt(body, "end", a.Endurance ?? 0);
+            AppendInt(body, "arm", a.Armor ?? 0);
+            AppendInt(body, "dflCh", a.DeflectChance ?? 0);
+            AppendInt(body, "dgCh", a.DodgeChance ?? 0);
+            AppendInt(body, "pryCh", a.ParryChance ?? 0);
+            AppendInt(body, "rAir", a.ResistAir ?? 0);
+            AppendInt(body, "rDth", a.ResistDeath ?? 0);
+            AppendInt(body, "rEth", a.ResistEarth ?? 0);
+            AppendInt(body, "rFir", a.ResistFire ?? 0);
+            AppendInt(body, "rLif", a.ResistLife ?? 0);
+            AppendInt(body, "rWtr", a.ResistWater ?? 0);
+            AppendInt(body, "cri", a.CritHit ?? 0);
+            AppendInt(body, "hit", a.Hit ?? 0);
+            AppendInt(body, "ap", a.AttackPower ?? 0);
+            AppendInt(body, "sp", a.SpellPower ?? 0);
+            AppendInt(body, "hstP", a.Physical ?? 0);
+            AppendInt(body, "hstS", a.Spell ?? 0);
+        });
+    }
+
+    private static void AppendEquipmentSection(StringBuilder sb, IReadOnlyList<EquipmentItem> eq)
+    {
+        AppendSection(sb, 'E', body =>
+        {
+            AppendInt(body, "n", eq.Count);
+            for (int i = 0; i < eq.Count; i++)
+            {
+                var it = eq[i];
+                AppendStr(body, "slot", it.Slot);
+                AppendStr(body, "id", it.ItemId ?? "");
+                AppendStr(body, "nm", it.Name);
+                AppendStr(body, "rar", it.Rarity ?? "");
+                AppendInt(body, "ilvl", it.ItemLevel ?? 0);
+                AppendInt(body, "aug", it.Augments ?? 0);
+            }
+        });
+    }
+
+    private static void AppendCurrencySection(StringBuilder sb, IReadOnlyList<CurrencyEntry> cur)
+    {
+        AppendSection(sb, 'Y', body =>
+        {
+            AppendInt(body, "n", cur.Count);
+            for (int i = 0; i < cur.Count; i++)
+            {
+                var c = cur[i];
+                AppendStr(body, "id", c.Id);
+                AppendStr(body, "nm", c.Name);
+                AppendLong(body, "amt", c.Amount);
+                AppendLong(body, "max", c.Max ?? 0);
+            }
+        });
+    }
+
+    private static void AppendGroupSection(StringBuilder sb, IReadOnlyList<GroupMember> grp)
+    {
+        AppendSection(sb, 'G', body =>
+        {
+            AppendInt(body, "n", grp.Count);
+            for (int i = 0; i < grp.Count; i++)
+            {
+                var m = grp[i];
+                AppendStr(body, "uid", m.UnitId);
+                AppendStr(body, "nm", m.Name);
+                AppendInt(body, "lvl", m.Level ?? 0);
+                AppendStr(body, "call", m.Calling ?? "");
+                AppendStr(body, "role", m.Role ?? "");
+                AppendInt(body, "hpP", m.HpPercent ?? 0);
+                AppendInt(body, "resP", m.ResourcePercent ?? 0);
+                AppendInt(body, "on", m.IsOnline ? 1 : 0);
+                AppendInt(body, "dead", m.IsDead ? 1 : 0);
+                AppendStr(body, "zn", m.ZoneName ?? "");
+            }
+        });
     }
 
     private static void AppendSection(StringBuilder sb, char tag, Action<StringBuilder> writer)

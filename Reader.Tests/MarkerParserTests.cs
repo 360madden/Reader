@@ -177,4 +177,173 @@ public class MarkerParserTests
         Assert.Equal(3, parsed.PlayerBuffs[1].Stacks);
         Assert.False(parsed.PlayerBuffs[1].CasterIsSelf);
     }
+
+    // ─── v4 phase-2 section round-trips ────────────────────────────────
+
+    [Fact]
+    public void V3Encoder_Cooldowns_RoundTrip()
+    {
+        var enc = new V3Encoder();
+        var cooldowns = new List<CooldownInfo>
+        {
+            new(AbilityId: 4001, Name: "Fireball",    RemainMs: 0,    DurationMs: 1500, ResourceCost: 30, ResourceKind: "mana"),
+            new(AbilityId: 4002, Name: "Wild Growth", RemainMs: 7800, DurationMs: 15000, ResourceCost: 0,  ResourceKind: null),
+        };
+        var snap = SampleSnapshot() with { Cooldowns = cooldowns };
+        byte[] buf = enc.Build(seq: 1, frameTimeMs: 0, flags: ReaderFlags.None, 'A', snap);
+        var parsed = MarkerParser.ParseFromBuffer(buf);
+
+        Assert.NotNull(parsed);
+        Assert.NotNull(parsed.Cooldowns);
+        Assert.Equal(2, parsed.Cooldowns.Count);
+        Assert.Equal(4001, parsed.Cooldowns[0].AbilityId);
+        Assert.Equal("Fireball", parsed.Cooldowns[0].Name);
+        Assert.Equal(0, parsed.Cooldowns[0].RemainMs);
+        Assert.Equal(1500, parsed.Cooldowns[0].DurationMs);
+        Assert.Equal(30, parsed.Cooldowns[0].ResourceCost);
+        Assert.Equal("mana", parsed.Cooldowns[0].ResourceKind);
+        Assert.Equal(7800, parsed.Cooldowns[1].RemainMs);
+        Assert.Null(parsed.Cooldowns[1].ResourceKind);
+    }
+
+    [Fact]
+    public void V3Encoder_Attributes_RoundTrip()
+    {
+        var enc = new V3Encoder();
+        var attrs = new CharacterStats(
+            Strength: 120, Dexterity: 85, Intelligence: 540, Wisdom: 310, Endurance: 420,
+            Armor: 3200, DeflectChance: 150, DodgeChance: 80, ParryChance: 10,
+            ResistAir: 0, ResistDeath: 50, ResistEarth: 25, ResistFire: 200, ResistLife: 30, ResistWater: 10,
+            CritHit: 1250, Hit: 140, AttackPower: 400, SpellPower: 980,
+            Physical: 0, Spell: 220);
+        var snap = SampleSnapshot() with { Attributes = attrs };
+        byte[] buf = enc.Build(seq: 1, frameTimeMs: 0, flags: ReaderFlags.None, 'A', snap);
+        var parsed = MarkerParser.ParseFromBuffer(buf);
+
+        Assert.NotNull(parsed);
+        Assert.NotNull(parsed.Attributes);
+        Assert.Equal(120, parsed.Attributes.Strength);
+        Assert.Equal(540, parsed.Attributes.Intelligence);
+        Assert.Equal(3200, parsed.Attributes.Armor);
+        Assert.Equal(200, parsed.Attributes.ResistFire);
+        Assert.Equal(1250, parsed.Attributes.CritHit);
+        Assert.Equal(980, parsed.Attributes.SpellPower);
+        Assert.Equal(220, parsed.Attributes.Spell);
+    }
+
+    [Fact]
+    public void V3Encoder_Equipment_RoundTrip()
+    {
+        var enc = new V3Encoder();
+        var eq = new List<EquipmentItem>
+        {
+            new(Slot: "Chest",    ItemId: "I-10045",  Name: "Plate of the Ascended",      Rarity: "epic",   ItemLevel: 425, Augments: 2),
+            new(Slot: "MainHand", ItemId: "I-99999",  Name: "Sword of |;= Edge Cases",    Rarity: "relic",  ItemLevel: 450, Augments: 3),
+            new(Slot: "Trinket1", ItemId: null,       Name: "Unidentified Trinket",       Rarity: null,     ItemLevel: null, Augments: null),
+        };
+        var snap = SampleSnapshot() with { Equipment = eq };
+        byte[] buf = enc.Build(seq: 1, frameTimeMs: 0, flags: ReaderFlags.None, 'A', snap);
+        var parsed = MarkerParser.ParseFromBuffer(buf);
+
+        Assert.NotNull(parsed);
+        Assert.NotNull(parsed.Equipment);
+        Assert.Equal(3, parsed.Equipment.Count);
+        Assert.Equal("Chest", parsed.Equipment[0].Slot);
+        Assert.Equal("I-10045", parsed.Equipment[0].ItemId);
+        Assert.Equal("Plate of the Ascended", parsed.Equipment[0].Name);
+        Assert.Equal("epic", parsed.Equipment[0].Rarity);
+        Assert.Equal(425, parsed.Equipment[0].ItemLevel);
+        Assert.Equal(2, parsed.Equipment[0].Augments);
+        // Embedded delimiters in item name survive length-prefix encoding.
+        Assert.Equal("Sword of |;= Edge Cases", parsed.Equipment[1].Name);
+        // Null-ish item survives round-trip as null
+        Assert.Equal("Trinket1", parsed.Equipment[2].Slot);
+        Assert.Null(parsed.Equipment[2].ItemId);
+        Assert.Null(parsed.Equipment[2].Rarity);
+    }
+
+    [Fact]
+    public void V3Encoder_Currency_RoundTrip()
+    {
+        var enc = new V3Encoder();
+        var cur = new List<CurrencyEntry>
+        {
+            new(Id: "PLAT", Name: "Platinum",      Amount: 12345678L, Max: null),
+            new(Id: "PLNR", Name: "Planarite",     Amount: 50000L,    Max: 1_000_000L),
+            new(Id: "VS",   Name: "Void Stones",   Amount: 2500L,     Max: 3000L),
+        };
+        var snap = SampleSnapshot() with { Currencies = cur };
+        byte[] buf = enc.Build(seq: 1, frameTimeMs: 0, flags: ReaderFlags.None, 'A', snap);
+        var parsed = MarkerParser.ParseFromBuffer(buf);
+
+        Assert.NotNull(parsed);
+        Assert.NotNull(parsed.Currencies);
+        Assert.Equal(3, parsed.Currencies.Count);
+        Assert.Equal("PLAT", parsed.Currencies[0].Id);
+        Assert.Equal("Platinum", parsed.Currencies[0].Name);
+        Assert.Equal(12345678L, parsed.Currencies[0].Amount);
+        Assert.Null(parsed.Currencies[0].Max);
+        Assert.Equal(1_000_000L, parsed.Currencies[1].Max);
+    }
+
+    [Fact]
+    public void V3Encoder_Group_RoundTrip()
+    {
+        var enc = new V3Encoder();
+        var grp = new List<GroupMember>
+        {
+            new(UnitId: "p101.1", Name: "Brethor",  Level: 70, Calling: "Warrior", Role: "Tank",  HpPercent: 100, ResourcePercent: 80, IsOnline: true,  IsDead: false, ZoneName: "Mathosia"),
+            new(UnitId: "p101.2", Name: "Selyndra", Level: 70, Calling: "Cleric",  Role: "Heal",  HpPercent: 95,  ResourcePercent: 60, IsOnline: true,  IsDead: false, ZoneName: "Mathosia"),
+            new(UnitId: "p101.3", Name: "Offline",  Level: 65, Calling: "Mage",    Role: "DPS",   HpPercent: 0,   ResourcePercent: 0,  IsOnline: false, IsDead: false, ZoneName: null),
+        };
+        var snap = SampleSnapshot() with { Group = grp };
+        byte[] buf = enc.Build(seq: 1, frameTimeMs: 0, flags: ReaderFlags.None, 'A', snap);
+        var parsed = MarkerParser.ParseFromBuffer(buf);
+
+        Assert.NotNull(parsed);
+        Assert.NotNull(parsed.Group);
+        Assert.Equal(3, parsed.Group.Count);
+        Assert.Equal("Brethor", parsed.Group[0].Name);
+        Assert.Equal("Tank", parsed.Group[0].Role);
+        Assert.True(parsed.Group[0].IsOnline);
+        Assert.False(parsed.Group[2].IsOnline);
+        Assert.Null(parsed.Group[2].ZoneName);
+    }
+
+    [Fact]
+    public void V3Encoder_AllPhase2Sections_FitWithin8KBody()
+    {
+        // Stress test: every phase-2 section populated with realistic volumes.
+        var enc = new V3Encoder();
+        var cooldowns = Enumerable.Range(0, 30).Select(i =>
+            new CooldownInfo(1000 + i, $"Ability{i}", i * 100, 30000, 50, "mana")).ToList();
+        var equipment = Enumerable.Range(0, 17).Select(i =>
+            new EquipmentItem($"Slot{i}", $"I-{i:D5}", $"Item {i} of Testing", "epic", 400 + i, 2)).ToList();
+        var currencies = Enumerable.Range(0, 10).Select(i =>
+            new CurrencyEntry($"CUR{i}", $"Currency {i}", 1000L * i, null)).ToList();
+        var group = Enumerable.Range(0, 5).Select(i =>
+            new GroupMember($"p1.{i}", $"Member{i}", 70, "Warrior", "DPS", 100, 80, true, false, "Zone")).ToList();
+        var attrs = new CharacterStats(100, 100, 500, 300, 400,
+            3000, 150, 80, 10, 0, 50, 25, 200, 30, 10, 1250, 140, 400, 980, 0, 220);
+
+        var snap = SampleSnapshot() with
+        {
+            Cooldowns = cooldowns,
+            Attributes = attrs,
+            Equipment = equipment,
+            Currencies = currencies,
+            Group = group,
+        };
+
+        byte[] buf = enc.Build(seq: 1, frameTimeMs: 0, flags: ReaderFlags.None, 'A', snap);
+        Assert.Equal(V3Layout.TotalLen, buf.Length);
+
+        var parsed = MarkerParser.ParseFromBuffer(buf);
+        Assert.NotNull(parsed);
+        Assert.Equal(30, parsed.Cooldowns!.Count);
+        Assert.Equal(17, parsed.Equipment!.Count);
+        Assert.Equal(10, parsed.Currencies!.Count);
+        Assert.Equal(5, parsed.Group!.Count);
+        Assert.NotNull(parsed.Attributes);
+    }
 }

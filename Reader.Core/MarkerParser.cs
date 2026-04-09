@@ -90,7 +90,12 @@ public static class MarkerParser
             TargetDebuffs: sectioned.TargetDebuffs,
             CombatEvents:  sectioned.CombatEvents,
             Combat:        sectioned.Combat,
-            Zone:          sectioned.Zone);
+            Zone:          sectioned.Zone,
+            Cooldowns:     sectioned.Cooldowns,
+            Attributes:    sectioned.Attributes,
+            Equipment:     sectioned.Equipment,
+            Currencies:    sectioned.Currencies,
+            Group:         sectioned.Group);
     }
 
     private struct ParsedSections
@@ -106,6 +111,12 @@ public static class MarkerParser
         public List<BuffInfo>? TargetBuffs;
         public List<BuffInfo>? TargetDebuffs;
         public List<CombatEvent>? CombatEvents;
+        // v4 phase-2 sections
+        public List<CooldownInfo>? Cooldowns;
+        public CharacterStats? Attributes;
+        public List<EquipmentItem>? Equipment;
+        public List<CurrencyEntry>? Currencies;
+        public List<GroupMember>? Group;
     }
 
     private static ParsedSections WalkSections(ReadOnlySpan<byte> body, uint secMask)
@@ -134,6 +145,12 @@ public static class MarkerParser
                 case 'b': result.TargetBuffs   = ParseBuffList(payload); break;
                 case 'd': result.TargetDebuffs = ParseBuffList(payload); break;
                 case 'C': result.CombatEvents  = ParseCombatList(payload); break;
+                // v4 phase-2 sections
+                case 'K': result.Cooldowns     = ParseCooldownList(payload); break;
+                case 'X': result.Attributes    = ParseAttributes(payload); break;
+                case 'E': result.Equipment     = ParseEquipmentList(payload); break;
+                case 'Y': result.Currencies    = ParseCurrencyList(payload); break;
+                case 'G': result.Group         = ParseGroupList(payload); break;
             }
 
             pos = payloadStart + (int)sectionLen;
@@ -302,6 +319,210 @@ public static class MarkerParser
         }
         if (inEntry)
             list.Add(new CombatEvent(t, src, dst, abi, ty, amt, crit, abs));
+        return list;
+    }
+
+    private static List<CooldownInfo> ParseCooldownList(ReadOnlySpan<byte> payload)
+    {
+        var list = new List<CooldownInfo>();
+        long id = 0;
+        int rem = 0, dur = 0, cost = 0;
+        string nm = "", rk = "";
+        bool inEntry = false;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            string key = KeyOf(k);
+            if (key == "n") continue;
+            if (key == "id")
+            {
+                if (inEntry)
+                {
+                    list.Add(new CooldownInfo(id, nm, rem, dur, cost, string.IsNullOrEmpty(rk) ? null : rk));
+                    nm = ""; rk = ""; rem = 0; dur = 0; cost = 0;
+                }
+                id = V3SectionWalker.DecodeLong(v) ?? 0;
+                inEntry = true;
+            }
+            else if (key == "nm")   nm   = V3SectionWalker.DecodeString(v);
+            else if (key == "rem")  rem  = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "dur")  dur  = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "cost") cost = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "rk")   rk   = V3SectionWalker.DecodeString(v);
+        }
+        if (inEntry)
+            list.Add(new CooldownInfo(id, nm, rem, dur, cost, string.IsNullOrEmpty(rk) ? null : rk));
+        return list;
+    }
+
+    private static CharacterStats ParseAttributes(ReadOnlySpan<byte> payload)
+    {
+        int? str = null, dex = null, intel = null, wis = null, end = null;
+        int? arm = null, dflCh = null, dgCh = null, pryCh = null;
+        int? rAir = null, rDth = null, rEth = null, rFir = null, rLif = null, rWtr = null;
+        int? cri = null, hit = null, ap = null, sp = null;
+        int? hstP = null, hstS = null;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            switch (KeyOf(k))
+            {
+                case "str":   str   = V3SectionWalker.DecodeInt(v); break;
+                case "dex":   dex   = V3SectionWalker.DecodeInt(v); break;
+                case "int":   intel = V3SectionWalker.DecodeInt(v); break;
+                case "wis":   wis   = V3SectionWalker.DecodeInt(v); break;
+                case "end":   end   = V3SectionWalker.DecodeInt(v); break;
+                case "arm":   arm   = V3SectionWalker.DecodeInt(v); break;
+                case "dflCh": dflCh = V3SectionWalker.DecodeInt(v); break;
+                case "dgCh":  dgCh  = V3SectionWalker.DecodeInt(v); break;
+                case "pryCh": pryCh = V3SectionWalker.DecodeInt(v); break;
+                case "rAir":  rAir  = V3SectionWalker.DecodeInt(v); break;
+                case "rDth":  rDth  = V3SectionWalker.DecodeInt(v); break;
+                case "rEth":  rEth  = V3SectionWalker.DecodeInt(v); break;
+                case "rFir":  rFir  = V3SectionWalker.DecodeInt(v); break;
+                case "rLif":  rLif  = V3SectionWalker.DecodeInt(v); break;
+                case "rWtr":  rWtr  = V3SectionWalker.DecodeInt(v); break;
+                case "cri":   cri   = V3SectionWalker.DecodeInt(v); break;
+                case "hit":   hit   = V3SectionWalker.DecodeInt(v); break;
+                case "ap":    ap    = V3SectionWalker.DecodeInt(v); break;
+                case "sp":    sp    = V3SectionWalker.DecodeInt(v); break;
+                case "hstP":  hstP  = V3SectionWalker.DecodeInt(v); break;
+                case "hstS":  hstS  = V3SectionWalker.DecodeInt(v); break;
+            }
+        }
+
+        return new CharacterStats(
+            str, dex, intel, wis, end,
+            arm, dflCh, dgCh, pryCh,
+            rAir, rDth, rEth, rFir, rLif, rWtr,
+            cri, hit, ap, sp,
+            hstP, hstS);
+    }
+
+    private static List<EquipmentItem> ParseEquipmentList(ReadOnlySpan<byte> payload)
+    {
+        var list = new List<EquipmentItem>();
+        string slot = "", id = "", nm = "", rar = "";
+        int ilvl = 0, aug = 0;
+        bool inEntry = false;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            string key = KeyOf(k);
+            if (key == "n") continue;
+            if (key == "slot")
+            {
+                if (inEntry)
+                {
+                    list.Add(new EquipmentItem(
+                        slot,
+                        string.IsNullOrEmpty(id) ? null : id,
+                        nm,
+                        string.IsNullOrEmpty(rar) ? null : rar,
+                        ilvl,
+                        aug));
+                    slot = ""; id = ""; nm = ""; rar = ""; ilvl = 0; aug = 0;
+                }
+                slot = V3SectionWalker.DecodeString(v);
+                inEntry = true;
+            }
+            else if (key == "id")   id   = V3SectionWalker.DecodeString(v);
+            else if (key == "nm")   nm   = V3SectionWalker.DecodeString(v);
+            else if (key == "rar")  rar  = V3SectionWalker.DecodeString(v);
+            else if (key == "ilvl") ilvl = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "aug")  aug  = V3SectionWalker.DecodeInt(v) ?? 0;
+        }
+        if (inEntry)
+            list.Add(new EquipmentItem(
+                slot,
+                string.IsNullOrEmpty(id) ? null : id,
+                nm,
+                string.IsNullOrEmpty(rar) ? null : rar,
+                ilvl,
+                aug));
+        return list;
+    }
+
+    private static List<CurrencyEntry> ParseCurrencyList(ReadOnlySpan<byte> payload)
+    {
+        var list = new List<CurrencyEntry>();
+        string id = "", nm = "";
+        long amt = 0, max = 0;
+        bool inEntry = false;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            string key = KeyOf(k);
+            if (key == "n") continue;
+            if (key == "id")
+            {
+                if (inEntry)
+                {
+                    list.Add(new CurrencyEntry(id, nm, amt, max == 0 ? null : max));
+                    id = ""; nm = ""; amt = 0; max = 0;
+                }
+                id = V3SectionWalker.DecodeString(v);
+                inEntry = true;
+            }
+            else if (key == "nm")  nm  = V3SectionWalker.DecodeString(v);
+            else if (key == "amt") amt = V3SectionWalker.DecodeLong(v) ?? 0;
+            else if (key == "max") max = V3SectionWalker.DecodeLong(v) ?? 0;
+        }
+        if (inEntry)
+            list.Add(new CurrencyEntry(id, nm, amt, max == 0 ? null : max));
+        return list;
+    }
+
+    private static List<GroupMember> ParseGroupList(ReadOnlySpan<byte> payload)
+    {
+        var list = new List<GroupMember>();
+        string uid = "", nm = "", call = "", role = "", zn = "";
+        int lvl = 0, hpP = 0, resP = 0;
+        bool on = false, dead = false;
+        bool inEntry = false;
+
+        var w = new V3SectionWalker(payload);
+        while (w.TryNext(out var k, out var v, out _))
+        {
+            string key = KeyOf(k);
+            if (key == "n") continue;
+            if (key == "uid")
+            {
+                if (inEntry)
+                {
+                    list.Add(new GroupMember(
+                        uid, nm, lvl,
+                        string.IsNullOrEmpty(call) ? null : call,
+                        string.IsNullOrEmpty(role) ? null : role,
+                        hpP, resP, on, dead,
+                        string.IsNullOrEmpty(zn) ? null : zn));
+                    uid = ""; nm = ""; call = ""; role = ""; zn = "";
+                    lvl = 0; hpP = 0; resP = 0; on = false; dead = false;
+                }
+                uid = V3SectionWalker.DecodeString(v);
+                inEntry = true;
+            }
+            else if (key == "nm")   nm   = V3SectionWalker.DecodeString(v);
+            else if (key == "lvl")  lvl  = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "call") call = V3SectionWalker.DecodeString(v);
+            else if (key == "role") role = V3SectionWalker.DecodeString(v);
+            else if (key == "hpP")  hpP  = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "resP") resP = V3SectionWalker.DecodeInt(v) ?? 0;
+            else if (key == "on")   on   = V3SectionWalker.DecodeBool(v);
+            else if (key == "dead") dead = V3SectionWalker.DecodeBool(v);
+            else if (key == "zn")   zn   = V3SectionWalker.DecodeString(v);
+        }
+        if (inEntry)
+            list.Add(new GroupMember(
+                uid, nm, lvl,
+                string.IsNullOrEmpty(call) ? null : call,
+                string.IsNullOrEmpty(role) ? null : role,
+                hpP, resP, on, dead,
+                string.IsNullOrEmpty(zn) ? null : zn));
         return list;
     }
 

@@ -16,4 +16,10 @@ public sealed record ReaderSnapshot(
     IReadOnlyList<BuffInfo>? TargetDebuffs = null,
     IReadOnlyList<CombatEvent>? CombatEvents = null,
     CombatStats? Combat = null,
-    ZoneInfo? Zone = null);
+    ZoneInfo? Zone = null,
+    // v4 phase-2 sections
+    IReadOnlyList<CooldownInfo>? Cooldowns = null,
+    CharacterStats? Attributes = null,
+    IReadOnlyList<EquipmentItem>? Equipment = null,
+    IReadOnlyList<CurrencyEntry>? Currencies = null,
+    IReadOnlyList<GroupMember>? Group = null);
